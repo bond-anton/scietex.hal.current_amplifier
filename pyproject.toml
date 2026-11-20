@@ -6,12 +6,32 @@ build-backend = "setuptools.build_meta"
 name = "scietex.hal.current_amplifier"
 dynamic = ["version"]
 description = "Scietex current amplifier HAL package"
+authors = [{ name = "Anton Bondarenko", email = "bond.anton@gmail.com" }]
+license = { file = "LICENSE" }
+readme = "README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
 requires-python = ">=3.10"
 dependencies = [
     "msgspec ~= 0.20.0",
     "scietex.hal.serial >= 2.5.0, < 3.0.0",
     "pymodbus >=3.15,<3.16",
 ]
+
+[project.urls]
+"Homepage" = "https://github.com/bond-anton/scietex.hal.current_amplifier"
+"Repository" = "https://github.com/bond-anton/scietex.hal.current_amplifier"
+"Bug Tracker" = "https://github.com/bond-anton/scietex.hal.current_amplifier/issues"
 
 # Registering the driver here would advertise a usable device to
 # `discover_drivers()`, which cannot happen while `DEVICE_MAP` is empty.
