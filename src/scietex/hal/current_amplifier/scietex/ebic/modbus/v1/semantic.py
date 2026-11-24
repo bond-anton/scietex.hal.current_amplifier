@@ -10,10 +10,13 @@ feedback loop open and the transimpedance stage is not deliberately left to
 saturate against its output clamp. No settle delay is inserted, so whether the
 new relay actually closes before the old opens depends on the relay operate and
 release times. Two ``Rf`` of one bank share both terminals, so the transient
-parallel pair is electrically defined. Booster gain changes stay break-before-make,
-because a one-hot gain pair has no defined gain and the feedback loop is not
-involved. The active channel therefore always has at least one engaged ``Rf``:
-exactly one at rest, transiently two during a same-bank swap, never zero.
+parallel pair is electrically defined. Booster gain changes follow the same
+engage-before-release order: the gain network is parallel too, so a transiently
+closed pair is an electrically defined state and the booster's feedback path is
+never commanded open. The readback still codes a gain one-hot, so a closed pair
+decodes to an undefined gain until the old relay releases. The active channel
+therefore always has at least one engaged ``Rf``: exactly one at rest,
+transiently two during a same-bank swap, never zero.
 
 The relay map records the firmware's relay-3 correspondence: ``OUT2`` is the
 low-Z output and ``OUT1`` the high-Z output. The firmware calls relay 3
@@ -373,6 +376,11 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         """
         Set the booster gain.
 
+        A change engages the target gain relay before it releases the old one.
+        The gain network is parallel, so the transient pair is an electrically
+        defined state and the booster's feedback path is never commanded open.
+        Unity selects no relay, so moving to it only releases the engaged one.
+
         Args:
             gain: One of ``1.0``, ``3.0``, ``10.0`` or ``30.0``.
 
@@ -390,13 +398,12 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         target = GAIN_RELAY[gain]
 
         def plan(_current: tuple[bool, ...]) -> list[tuple[Relay, bool]]:
-            steps = [
-                (relay, coil_level(relay, False))
-                for relay in (Relay.GAIN_X3, Relay.GAIN_X10, Relay.GAIN_X30)
-                if relay is not target
-            ]
+            steps: list[tuple[Relay, bool]] = []
             if target is not None:
                 steps.append((target, coil_level(target, True)))
+            for relay in (Relay.GAIN_X3, Relay.GAIN_X10, Relay.GAIN_X30):
+                if relay is not target:
+                    steps.append((relay, coil_level(relay, False)))
             return steps
 
         await self._transition("set boost gain", plan)

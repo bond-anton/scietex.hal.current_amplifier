@@ -106,25 +106,25 @@ pre-amp.
   (reference) input and **subtracted** from the pre-amplifier signal.
 - Powered from **+/-12 V**; the output is linear over **+/-10 V**.
 
-The two selectors sequence their transitions differently, because their relays
-differ electrically. A gain change is **break-before-make**: the gain relays are a
-one-hot selector, closing two of them is not a defined state, and a gain change
-produces a transient on the output while the feedback path is momentarily
-interrupted. Break-before-make minimises the no-feedback window and
-never presents two gain stages at once, but it cannot remove the glitch, which is
-a hardware property. The driver cannot measure it (no ADC), and adding an
-inter-write delay would be a timing guess. Downstream consumers should expect a
-transient on gain changes; this is an accepted risk (§11).
+The two selectors use the same ordering policy, because both are parallel
+networks. The four same-bank `Rf` resistors share both terminals, and the
+booster's gain relays add parallel elements, so closing a gain relay alongside
+another is an electrically defined state — a parallel gain — exactly as two
+closed same-bank `Rf` relays form `R1*R2/(R1+R2)`. Both selectors are therefore
+**make-before-break**: the driver engages the target relay first, then releases
+the others, so the transconductance or feedback loop is never commanded open.
 
-A same-bank `Rf` change is **make-before-break**: the four `Rf` resistors in a bank
-share both terminals, so the driver engages the target relay first, then writes
-the channel relays and relay 3, then releases the old `Rf`. Two closed same-bank
-relays form a genuine parallel resistance (`R1*R2/(R1+R2)`), and the write order
-never commands the transimpedance loop open. Break-before-make would leave the pre-amp with no
-feedback across the relay gap, so the stage would saturate at the +/-5 V clamp and
-have to recover from overload. The intermediate value is a small step — 1 kΩ ||
-10 kΩ = 909 Ω, about 10 % — and remains linear. Cross-bank `Rf` changes already
-kept a feedback path engaged and still do.
+A same-bank `Rf` change engages the target relay first, then writes the channel
+relays and relay 3, then releases the old `Rf`. The intermediate value is a small
+step — 1 kΩ || 10 kΩ = 909 Ω, about 10 % — and remains linear. Cross-bank `Rf`
+changes already kept a feedback path engaged and still do.
+
+A gain change engages the target gain relay first, then releases the others.
+`×1` is the all-relays-open state and the power-on default working gain, so it
+has no engage step: it only releases whichever gain relay was engaged. Because
+the booster always has a closed feedback path, a gain step's transient is the
+parallel combination of the two gain elements together with the gain change
+itself, but the loop is never commanded open.
 
 **Write order is not relay timing.** The driver issues these writes back to back
 with no settle delay, so whether the new relay actually closes before the old
@@ -298,7 +298,7 @@ since a signal can exist without being readable.
 | Contract member | Mapping for this board | Notes |
 | --- | --- | --- |
 | `output_voltage.min_v` / `max_v` | `-10.0` / `+10.0` | Static geometry of the booster's linear range |
-| `boost.gain` | `SelectableCapabilities(access=Access(read=True, write=True), options=(1.0, 3.0, 10.0, 30.0))` | Readable and writable through the gain relays; ×1 is all gain relays off. Implemented by `EBICModbusV1Amplifier` |
+| `boost.gain` | `SelectableCapabilities(access=Access(read=True, write=True), options=(1.0, 3.0, 10.0, 30.0))` | Readable and writable through the gain relays; ×1 is all gain relays off. A gain change is make-before-break, and ×1 has no engage step (it releases only). Implemented by `EBICModbusV1Amplifier` |
 | `boost.default_gain` | `1.0` | Unit gain at power-on |
 | `preamp.feedback_resistor` | `SelectableCapabilities` over `(1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0, 100_000_000.0, 1_000_000_000.0, 10_000_000_000.0)` | The single selectable pre-amp control; low-Z {1 kΩ … 1 MΩ}, high-Z {10 MΩ … 10 GΩ}. Implemented by `EBICModbusV1Amplifier`; a same-bank change is make-before-break and a cross-bank change keeps a feedback path engaged |
 | `preamp.max_output_v` | `5.0` | Static geometry: pre-amp clip point, where Overcurrent trips |
@@ -367,14 +367,13 @@ happens after the transition completes.
   relay-3 coil 1 (OUT2) and high-Z to coil 0 (OUT1), and `select_feedback_resistor`
   writes it on every channel change. Relay 3 is independent in hardware; the
   non-contract `set_booster_source(out2)` overrides the tracking.
-- **D3 — `Rf` make-before-break, gain break-before-make.** The two selectors use
-  opposite orderings because their relays differ. A same-bank `Rf` change engages
-  the target relay before releasing the old one; the four `Rf` resistors in a bank
-  share both terminals, so the transient is a defined parallel resistance and the
-  loop is never commanded open. Cross-bank `Rf` changes keep a feedback path engaged
-  throughout. A gain change still releases the old stage before engaging the new
-  one, because the gain relays are one-hot and two closed relays are not a defined
-  state.
+- **D3 — both selectors make-before-break.** `Rf` and gain are parallel networks,
+  so both changes engage the target relay before releasing the others. A same-bank
+  `Rf` change forms a defined parallel resistance (`R1*R2/(R1+R2)`) and cross-bank
+  changes keep a feedback path engaged; a gain change forms a parallel gain, and
+  ×1 has no engage step because it is the all-relays-open state — it releases the
+  engaged relay only. The loop is never commanded open; the ordering is not a
+  timing guarantee (no settle delay, §4).
 
 The derived helpers remain computable from the capability set alone once the `Rf`
 values are known: `total_transconductance(feedback_resistor_ohm, boost_gain)`,
@@ -384,7 +383,7 @@ values are known: `total_transconductance(feedback_resistor_ohm, boost_gain)`,
 depend on a populated snapshot; `max_input_current_a` returns `None` when the
 pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
 
-## 11. Resolved questions and accepted risks
+## 11. Resolved questions
 
 ### Resolved (firmware / policy)
 
@@ -393,11 +392,12 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
 - [x] Booster source tracking: relay 3 is independent in hardware, but the driver
       always routes the selected channel's output to the booster via
       `relaymap.BOOSTER_COILS`; `set_booster_source(out2)` overrides it (§8).
-- [x] Gain break-before-make, `Rf` make-before-break: the driver sequences gain
-      changes break-before-make (one-hot selector, two closed relays undefined)
-      and same-bank `Rf` changes make-before-break (shared terminals, defined
-      parallel transient, loop never commanded open), so it needs no guarantee from the
-      relays (§4).
+- [x] Gain and `Rf` make-before-break: both selectors drive parallel networks
+      (the gain relays add parallel elements; same-bank `Rf` resistors share both
+      terminals), so the driver engages the target relay before releasing the
+      others and the loop is never commanded open. A gain change engages the target
+      gain relay first and releases the rest; ×1 has no engage step and only
+      releases the engaged relay, since it is the all-relays-open state (§4).
 
 ### Resolved (firmware evidence)
 
@@ -431,13 +431,10 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
       because the resistors share both terminals and make-before-break keeps the
       loop closed (§4). That transient state is electrically defined
       (`R1*R2/(R1+R2)`) but is never a target selection (§3).
-
-### Accepted risks
-
-- [x] Gain-change glitch: break-before-make gives the shortest no-feedback window
-      and never presents two gain stages at once, but the transient is a hardware
-      property the driver cannot measure (no ADC). Downstream consumers should
-      expect a transient on gain changes (§4). The `Rf` saturation risk this once
-      shared is now mitigated by make-before-break, which never commands the loop
-      open; the mitigation is ordering-based and not timing-guaranteed, because the
-      two writes carry no settle delay (§4).
+- [x] Gain-change transient: resolved by make-before-break. The driver no longer
+      commands the booster's feedback path open, so the rail-slam / overload-recovery
+      transient is not deliberately produced. A gain step still produces a
+      transient — the intermediate value is the parallel gain and the gain itself
+      changes — but the loop stays closed. The mitigation is ordering-based, not
+      timing-guaranteed: the two writes carry no settle delay, so physical overlap
+      depends on relay operate and release times (§4).

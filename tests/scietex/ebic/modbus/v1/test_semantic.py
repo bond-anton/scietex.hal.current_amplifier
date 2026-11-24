@@ -176,6 +176,32 @@ def _assert_feedback_path_never_opens(states) -> bool:
     return saw_parallel_pair
 
 
+def _assert_gain_make_before_break(sequences) -> bool:
+    """Assert each gain sequence engages before it releases.
+
+    Each sequence is the coil vector before the call followed by the vector after
+    every write. No state holds more than two engaged gain relays, the incoming
+    relay closes on the first write, and a relay-to-relay change never drops
+    below one engaged relay. Returns whether such a change actually passed
+    through the two-relay parallel pair.
+    """
+    saw_parallel_pair = False
+    for states in sequences:
+        assert len(_engaged_gains(states[-1])) <= 1
+        old = set(_engaged_gains(states[0]))
+        new = set(_engaged_gains(states[-1]))
+        if new - old:
+            assert new <= set(_engaged_gains(states[1]))
+        if old and new:
+            assert all(_engaged_gains(coils) for coils in states)
+        for coils in states:
+            assert len(_engaged_gains(coils)) <= 2
+        if len(old | new) == 2:
+            saw_parallel_pair = True
+            assert any(len(_engaged_gains(coils)) == 2 for coils in states)
+    return saw_parallel_pair
+
+
 # -- polarity ---------------------------------------------------------------
 
 
@@ -319,25 +345,41 @@ async def test_selecting_a_channel_also_routes_it_to_the_booster(
 
 
 @pytest.mark.asyncio
-async def test_gain_is_one_hot_over_relays_fourteen_to_sixteen():
-    """Coils 14 and 15 carry the x10 and x30 relays, never two at once."""
+async def test_gain_changes_engage_the_new_relay_before_releasing_the_old():
+    """x10 engages coil 14 first; x30 then engages coil 15 before coil 14 releases."""
     fake = FakeRelayAccess()
     driver = _driver(fake)
 
     await driver.set_boost_gain(10.0)
     assert fake.writes == [(14, False)]
 
+    count = len(fake.writes)
     await driver.set_boost_gain(30.0)
-    assert fake.writes == [(14, False), (14, True), (15, False)]
+    assert fake.writes[count:] == [(15, False), (14, True)]
+    assert _engaged_gains(fake.coils) == [Relay.GAIN_X30]
 
-    _, states = _replay(POWER_ON_COILS, fake.writes)
-    for coils in states:
-        assert len(_engaged_gains(coils)) <= 1
-    assert _engaged_gains(states[-1]) == [Relay.GAIN_X30]
-
+    count = len(fake.writes)
     await driver.set_boost_gain(1.0)
-    assert fake.writes[-1] == (15, True)
+    assert fake.writes[count:] == [(15, True)]
     assert _engaged_gains(fake.coils) == []
+
+
+@pytest.mark.asyncio
+async def test_every_gain_change_closes_the_parallel_pair_before_opening_it():
+    """x3 to x10 to x30 to x1 to x3 never releases before it engages."""
+    fake = FakeRelayAccess(_coils(Relay.GAIN_X3))
+    driver = _driver(fake)
+
+    sequences = []
+    for gain in (10.0, 30.0, 1.0, 3.0):
+        before = tuple(fake.coils)
+        count = len(fake.writes)
+        await driver.set_boost_gain(gain)
+        _, states = _replay(before, fake.writes[count:])
+        sequences.append(states)
+
+    assert _assert_gain_make_before_break(sequences) is True
+    assert _engaged_gains(fake.coils) == [Relay.GAIN_X3]
 
 
 # -- idempotence and validation --------------------------------------------
@@ -510,6 +552,35 @@ async def test_a_failed_same_bank_release_leaves_a_parallel_pair_and_recovers():
 
     assert _rf_bank_counts(fake.coils)[RfChannel.LOW_Z] == 1
     assert decode_coils(fake.coils).feedback_resistor_ohm == 1_000.0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_gain_release_leaves_a_parallel_pair_and_recovers():
+    """A release that raises leaves two gain relays; a later set trims to one."""
+    fake = FakeRelayAccess(_coils(Relay.GAIN_X3), fail_at=2)
+    driver = _driver(fake)
+
+    with pytest.raises(RelayTransitionError) as excinfo:
+        await driver.set_boost_gain(10.0)
+
+    error = excinfo.value
+    assert error.operation == "set boost gain"
+    assert error.failed_coil == coil_index(Relay.GAIN_X3)
+    assert error.target[coil_index(Relay.GAIN_X10)] is False
+    assert error.target[coil_index(Relay.GAIN_X3)] is True
+    assert len(fake.writes) == 2
+    assert _engaged_gains(fake.coils) == [Relay.GAIN_X3, Relay.GAIN_X10]
+
+    state = await driver.read_data()
+    assert state.boost_gain is None
+    with pytest.raises(UnexpectedResponse):
+        await driver.get_boost_gain()
+
+    fake.fail_at = None
+    await driver.set_boost_gain(10.0)
+
+    assert _engaged_gains(fake.coils) == [Relay.GAIN_X10]
+    assert decode_coils(fake.coils).boost_gain == 10.0
 
 
 @pytest.mark.asyncio
