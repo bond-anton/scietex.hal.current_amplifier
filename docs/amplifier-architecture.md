@@ -13,12 +13,12 @@ what the digital interface can and cannot reach, and the mapping of the analog
 architecture onto the HAL capability contract in
 `scietex.hal.current_amplifier.base.capabilities`.
 
-**Out of scope.** The relay-to-coil index map (produced separately by the
-hardware owner; this document counts relays but never assigns an index). The
-Modbus register map and transport behaviour — see [../README.md](../README.md)
-and the driver package under
-`src/scietex/hal/current_amplifier/scietex/ebic/modbus/v1/`. Resistor values are
-unknown and appear as `TBD`.
+**Out of scope.** The Modbus register map and transport behaviour — see
+[../README.md](../README.md) and the driver package under
+`src/scietex/hal/current_amplifier/scietex/ebic/modbus/v1/`. The per-relay
+function, coil index and GPIO pin of all 17 relays are documented in
+[relay-function-map.md](relay-function-map.md); this document uses the relay
+numbers from that map and discusses the analog architecture behind them.
 
 ## 2. Block diagram
 
@@ -32,43 +32,52 @@ relay-controlled. `clip` marks where a stage saturates.
                      |                          |
                      v                          v
  BNC --[CH SEL]--> +-------------+  Vpre   +----------------+  Vout
-       1 relay     | STAGE 1     |-------->| STAGE 2        |-------> OUT
+       2 relays    | STAGE 1     |-------->| STAGE 2        |-------> OUT
  Iin ------------> | pre-amp TIA | /-5 V   | booster        | /-10 V
                    | (+) <--Vbias|  clip   | G = 1/3/10/30  |  clip
                    +------+------+         | (ref)<--Vbias  |
                           | Rf bank        |        + Vcomp |
                    +------+-------+        +----------------+
-                   | Low  Rf_L1..L4| 4 rly        ^
-                   | High Rf_H1..H4| 4 rly        |
+                   | Low-Z 1k-1M   | 4 rly        ^
+                   | High-Z 10M-10G| 4 rly        |
                    +---------------+         Vcomp (external)
                                           [COMP ENABLE, 1 relay]
 ```
+
+The diagram draws the selected path only. The unselected channel is kept in a
+defined state by relay 2, which closes its feedback, and relay 3 selects which of
+the two stage-1 outputs reaches the booster.
 
 Relay-controlled elements in the diagram, counted:
 
 | Element | Relays |
 | --- | --- |
-| Channel select | 1 |
-| `Rf` low-current bank (`Rf_L1..L4`) | 4 |
-| `Rf` high-current bank (`Rf_H1..H4`) | 4 |
-| Gain select (one relay per discrete gain) | 4 |
+| Channel select (relays 1–2) | 2 |
+| Booster source (`OUT1`/`OUT2`, relay 3) | 1 |
+| `Rf`, high-Z bank (relays 5–8) | 4 |
+| `Rf`, low-Z bank (relays 9–12) | 4 |
+| Gain select (one relay per non-unity gain) | 3 |
 | Bias enable | 1 |
 | Compensation enable | 1 |
-| **Total** | **15** |
+| Bias/compensation source select | 1 |
+| **Total** | **17** |
 
-The board exposes 17 relay outputs, so 2 are unaccounted for by this description;
-see §8 and §11.
+All 17 relay outputs are accounted for by this description; see §8 for the relay
+budget and [relay-function-map.md](relay-function-map.md) for the per-relay
+functions.
 
 ## 3. Stage 1 - pre-amplifier
 
 A transimpedance stage, current to voltage, driven from a single BNC input.
 
-- One relay selects the active input-current path: the low-input-current channel
-  or the high-input-current channel.
-- Each channel owns **four** feedback resistors `Rf`, and each `Rf` has its own
-  dedicated relay. Eight `Rf` relays in total: four for the low-current channel
-  (`Rf_L1..Rf_L4`), four for the high-current channel (`Rf_H1..Rf_H4`). The
-  relays are independent; there is no binary encoding among them.
+- Relay 1 selects the active input path: the low-Z channel or the high-Z channel.
+  Relay 2 closes the feedback of the deselected channel, so the unused stage stays
+  in a defined state; the two relays always carry the same coil value.
+- Each channel owns **four** feedback resistors `Rf`, each with its own dedicated
+  relay. Eight in total, in relay order: relays 5–8 are the high-Z bank
+  (10 GΩ, 1 GΩ, 100 MΩ, 10 MΩ) and relays 9–12 the low-Z bank (1 MΩ, 100 kΩ,
+  10 kΩ, 1 kΩ). The relays are independent; there is no binary encoding among
+  them.
 - The stage is rated for a maximum output of **+/-5 V**. At that level the
   **Overcurrent** signal goes active (high = active). The signal is generated on
   the board but never reaches a register; see §9.
@@ -84,7 +93,8 @@ model assumes exactly one `Rf` relay per active channel is closed. See §11.
 An instrumentation amplifier providing dimensionless voltage gain after the
 pre-amp.
 
-- Discrete gains **1, 3, 10, 30**, selected by relays.
+- Discrete gains **1, 3, 10, 30**, selected by three relays (14–16); ×1 is the
+  absence of all three.
 - The bias and compensation voltages are **summed** on the booster's second
   (reference) input and **subtracted** from the pre-amplifier signal.
 - Powered from **+/-12 V**; the output is linear over **+/-10 V**.
@@ -94,9 +104,12 @@ glitches the output, is not stated; see §11.
 
 ## 5. Bias and compensation
 
-Both are applied from external analog voltages. This board has **no internal
-generation and no level control** for either; it can only connect or disconnect
-each through its enable relay.
+Both are applied from external analog voltages, but the board is not limited to a
+manual path: relay 13 selects DAC or manual as the source for bias and
+compensation together, so a DAC path exists. There is still **no level control**
+over Modbus for either: the board can enable or disable each (relays 4 and 17)
+and select the source (relay 13), nothing more. What drives the DAC path, and
+whether it is reachable over Modbus, is an open item (§11).
 
 | Signal | Enable relay | Reaches pre-amp `+` | Reaches booster ref | Effect |
 | --- | --- | --- | --- | --- |
@@ -166,38 +179,35 @@ I_fullscale(G) = min(5, 10/G) / Rf_ch
 The pre-amp is the binding limit only at `G = 1`; at `G = 3, 10, 30` the booster
 output clips first.
 
-Full-scale input current per resistor. Values `TBD` until the `Rf` resistors are
-known; fill by `I = min(5, 10/G) / Rf`.
+Full-scale input current per resistor, computed by `I = min(5, 10/G) / Rf`
+with the `Rf` values from the relay map.
 
-| Symbol | `Rf` [ohm] | `I_fullscale(1)` [A] | `I_fullscale(3)` [A] | `I_fullscale(10)` [A] | `I_fullscale(30)` [A] |
-| --- | --- | --- | --- | --- | --- |
-| `Rf_L1` | TBD | TBD | TBD | TBD | TBD |
-| `Rf_L2` | TBD | TBD | TBD | TBD | TBD |
-| `Rf_L3` | TBD | TBD | TBD | TBD | TBD |
-| `Rf_L4` | TBD | TBD | TBD | TBD | TBD |
-| `Rf_H1` | TBD | TBD | TBD | TBD | TBD |
-| `Rf_H2` | TBD | TBD | TBD | TBD | TBD |
-| `Rf_H3` | TBD | TBD | TBD | TBD | TBD |
-| `Rf_H4` | TBD | TBD | TBD | TBD | TBD |
+| Channel | Relay | `Rf` [Ω] | `I_fullscale(1)` [A] | `I_fullscale(3)` [A] | `I_fullscale(10)` [A] | `I_fullscale(30)` [A] |
+| --- | --- | --- | --- | --- | --- | --- |
+| low-Z | 9 | 1 MΩ (1 000 000) | 5.00e-6 | 3.33e-6 | 1.00e-6 | 3.33e-7 |
+| low-Z | 10 | 100 kΩ (100 000) | 5.00e-5 | 3.33e-5 | 1.00e-5 | 3.33e-6 |
+| low-Z | 11 | 10 kΩ (10 000) | 5.00e-4 | 3.33e-4 | 1.00e-4 | 3.33e-5 |
+| low-Z | 12 | 1 kΩ (1 000) | 5.00e-3 | 3.33e-3 | 1.00e-3 | 3.33e-4 |
+| high-Z | 5 | 10 GΩ (10 000 000 000) | 5.00e-10 | 3.33e-10 | 1.00e-10 | 3.33e-11 |
+| high-Z | 6 | 1 GΩ (1 000 000 000) | 5.00e-9 | 3.33e-9 | 1.00e-9 | 3.33e-10 |
+| high-Z | 7 | 100 MΩ (100 000 000) | 5.00e-8 | 3.33e-8 | 1.00e-8 | 3.33e-9 |
+| high-Z | 8 | 10 MΩ (10 000 000) | 5.00e-7 | 3.33e-7 | 1.00e-7 | 3.33e-8 |
 
 ## 8. Relay budget
 
 | Function | Relays |
 | --- | --- |
-| Channel select | 1 |
-| `Rf` low-current bank | 4 |
-| `Rf` high-current bank | 4 |
-| Gain select (four one-hot) | 4 |
-| Bias enable | 1 |
-| Compensation enable | 1 |
-| **Used** | **15** |
-| Available | 17 |
-| **Unaccounted** | **2** |
+| Channel selection (relays 1–2) | 2 |
+| Booster source (relay 3) | 1 |
+| Bias enable (relay 4) | 1 |
+| `Rf`, low-Z and high-Z (relays 5–12) | 8 |
+| Gain select (relays 14–16) | 3 |
+| Compensation enable (relay 17) | 1 |
+| Bias/compensation source select (relay 13) | 1 |
+| **Total** | **17** |
 
-Two relays are unaccounted for. If the gain selector were binary-coded instead of
-one-hot, four gains need 2 relays and the total would be **13**, leaving four
-unaccounted. The exact split is therefore a relay-map question, not a settled
-fact; see §11.
+All 17 relay outputs are accounted for. The per-relay function table, with coil
+index and GPIO pin, is in [relay-function-map.md](relay-function-map.md).
 
 ## 9. What Modbus can and cannot reach
 
@@ -211,6 +221,7 @@ to a coil or register cannot be observed over the bus.
 | Output overload / clipping | yes (analog behaviour) | no - no measurement path |
 | Bias level | external voltage | no - no readback, no level control |
 | Compensation level | external voltage | no - no readback, no level control |
+| Bias/compensation source (DAC vs manual) | yes (relay 13) | yes - coil writable; the DAC level is not |
 | Enable states (bias, compensation, relays) | yes | yes - coils 0-16, readable by FC01, writable by FC05/FC0F |
 | Bandwidth / filtering | fixed by design | no - not adjustable, not reportable |
 | Invert | absent | absent |
@@ -219,6 +230,11 @@ to a coil or register cannot be observed over the bus.
 The Overcurrent comparator output exists physically and is **not reportable over
 Modbus**; it matters only if the board brings it out to a connector a gateway
 could read (open item, §11).
+
+Bias and compensation can come from a manual source or from a DAC path, selected
+together by relay 13, so a DAC path exists. What drives it and whether it is
+reachable over Modbus is an open item (§11). The *level* of either is still not
+settable over Modbus.
 
 ## 10. Mapping to the HAL capability contract
 
@@ -232,17 +248,17 @@ since a signal can exist without being readable.
 | Contract member | Mapping for this board | Notes |
 | --- | --- | --- |
 | `output_voltage.min_v` / `max_v` | `-10.0` / `+10.0` | Static geometry of the booster's linear range |
-| `boost.gain` | `SelectableCapabilities(access=Access(read=True, write=True), options=(1.0, 3.0, 10.0, 30.0))` | Readable and writable through the gain relays |
+| `boost.gain` | `SelectableCapabilities(access=Access(read=True, write=True), options=(1.0, 3.0, 10.0, 30.0))` | Readable and writable through the gain relays; ×1 is all gain relays off. Known, not implemented in the driver yet |
 | `boost.default_gain` | `1.0` | Unit gain at power-on |
-| `preamp.feedback_resistor` | `SelectableCapabilities` over the eight `Rf` values, `TBD` | The single selectable pre-amp control; the channel is implied by the resistor |
+| `preamp.feedback_resistor` | `SelectableCapabilities` over `(1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0, 100_000_000.0, 1_000_000_000.0, 10_000_000_000.0)` | The single selectable pre-amp control; low-Z {1 kΩ … 1 MΩ}, high-Z {10 MΩ … 10 GΩ}. Coil mapping known, not implemented in the driver yet |
 | `preamp.max_output_v` | `5.0` | Static geometry: pre-amp clip point, where Overcurrent trips |
 | `preamp.range` | no longer a contract member | Derived: `min(preamp.max_output_v, amplifier_swing / G) / Rf` |
 | `input_overcurrent` | `IndicationCapabilities(present=True, read=False)` | Comparator exists on the board, unreachable over Modbus (§9) |
 | `output_overload` | `IndicationCapabilities()` | No detector: clipping is a rail behaviour, not a flag (§9) |
 | `bandwidth` | `BandwidthCapabilities()` (falsy) | Fixed by the analog design, value unknown, not selectable, not reportable |
-| `dc_bias.enabled` | `Access(read=True, write=True)` | Bias enable relay; readable and writable |
+| `dc_bias.enabled` | `Access(read=True, write=True)` | Bias enable relay 4; readable and writable |
 | `dc_bias.level` | `Access()` (both `False`) | Absent: external voltage, no readback, no level control |
-| `input_compensation.enabled` | `Access(read=True, write=True)` | Compensation enable relay |
+| `input_compensation.enabled` | `Access(read=True, write=True)` | Compensation enable relay 17 |
 | `input_compensation.level` | `Access()` (both `False`) | Absent: external voltage, no readback, no level control |
 | `filters` | `FilterCapabilities()` | Absent: no filter relays, fixed filtering |
 | `invert_output` | `Access()` (both `False`) | Absent: no invert relay |
@@ -266,9 +282,9 @@ The capability API exposes the same rule. `PreampCapabilities` carries
 rf, gain)` supplies the swing from `capabilities.output_voltage` and returns
 `None` when either the pre-amp ceiling or the amplifier swing is unknown.
 
-The channel designator is deliberately not a contract member. The low- and
-high-current channels are a grouping of `feedback_resistor.options`, and a flat
-`SelectableCapabilities` cannot express the 2x4 cross product; choosing an `Rf`
+The channel designator is deliberately not a contract member. The low-Z and
+high-Z channels are a grouping of `feedback_resistor.options`, and a flat
+`SelectableCapabilities` cannot express the 2×4 cross product; choosing an `Rf`
 already determines the channel, so the grouping lives in the relay map rather
 than in the contract.
 
@@ -293,14 +309,15 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
 
 ## 11. Open items
 
-- [ ] `Rf` values for `Rf_L1..L4` and `Rf_H1..H4` (referenced in §7, §10).
-- [ ] Relay-to-coil index map for all 17 relays (out of scope here; §1, §8).
-- [ ] Gain relay coding: four one-hot relays versus two binary relays (§8).
 - [ ] Pre-amp sign convention: inverting or non-inverting, confirmed on the bench
       (§6).
+- [ ] OUT1/OUT2 ↔ channel correspondence; the power-on defaults are only
+      self-consistent if OUT2 is the low-Z output (§8).
+- [ ] Whether relay 3 must track the selected channel or is a free control (§8).
+- [ ] What drives the DAC path (relay 13) and whether it is reachable over Modbus
+      (§9).
 - [ ] Behaviour when two `Rf` relays in one channel are closed simultaneously:
       parallel resistors (summed conductance) or undefined (§3).
-- [ ] The two unaccounted relays and what they drive (§8).
 - [ ] Whether the gain relays are break-before-make: output glitch during a gain
       change (§4).
 - [ ] Whether the Overcurrent signal is brought out to a connector a gateway could

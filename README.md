@@ -9,11 +9,12 @@ in `scietex.hal.current_amplifier.base` are complete and usable now: they descri
 what an amplifier can do, what it currently reads, and the asynchronous methods a
 driver implements. The first hardware driver talks to the EBIC v1.0 preamp over
 Modbus RTU; it covers the device's relay outputs and communication settings,
-which is what that firmware implements. Mapping those relays to preamp ranges,
-boost, bias or filters needs the board's relay table and is not part of this
-driver yet, so the driver declares only the static analog geometry it can know
-without that map — the pre-amp +/-5 V clip point, the booster +/-10 V linear
-range, and the presence of the Overcurrent comparator — and it selects and
+which is what that firmware implements. Mapping those relays to feedback
+resistors, boost, bias or filters is now documented in
+[docs/relay-function-map.md](docs/relay-function-map.md) but is not implemented
+in this driver yet, so the driver declares only the static analog geometry it can
+know without a semantic layer — the pre-amp +/-5 V clip point, the booster +/-10 V
+linear range, and the presence of the Overcurrent comparator — and it selects and
 reports nothing; its state snapshot is empty.
 
 ## Status
@@ -187,7 +188,7 @@ the device exposes seventeen relay outputs and the two settings that reach them,
 and nothing else. There is no ADC, DAC, measurement, status or unlock register,
 so the driver does not invent one.
 
-The analog architecture behind the relay bank is described in [docs/amplifier-architecture.md](docs/amplifier-architecture.md).
+The analog architecture behind the relay bank is described in [docs/amplifier-architecture.md](docs/amplifier-architecture.md), and the per-relay function and coil map in [docs/relay-function-map.md](docs/relay-function-map.md).
 
 | Item | Value |
 | --- | --- |
@@ -227,8 +228,11 @@ finally:
   persists each level in turn, so a failure can leave a partial group. Re-read
   after an error instead of assuming a state.
 - Every relay write is persisted to EEPROM. The interface is a state switch, not
-  a PWM output, and frequent switching consumes flash write cycles. The level
-  reaches the GPIO; the driver board may invert it at the relay contact.
+  a PWM output, and frequent switching consumes flash write cycles. `set_relay`
+  and `set_relays` write the coil level, which is the raw GPIO level: coil value
+  1 is de-energised for every relay, but it is the feature-off state for every
+  relay except relay 12, where it connects the 1 kΩ resistor. See
+  [docs/relay-function-map.md](docs/relay-function-map.md).
 - `get_slave_address()` / `set_slave_address()` and `get_baud_index()` /
   `set_baud_rate()` read and write holding registers 0 and 1. A write is
   acknowledged at the OLD address and baud rate, persisted to EEPROM, and
@@ -243,9 +247,11 @@ The driver declares only the static analog geometry: `preamp.max_output_v = 5.0`
 IndicationCapabilities(present=True, read=False)`. Every `supports_*`/`can_*`
 property stays `False`, and `read_data()` returns an `AmplifierState` whose fields
 are all `None` with an empty filter tuple: the firmware has no measurement or
-status register and the `Rf` values are unknown, so `None` is not zero. Preamp
-ranges, boost, bias and filters become available only when the relay-to-function
-map is documented and a semantic layer is built on top of this one.
+status register, so `None` is not zero. The relay-to-function map is now
+documented in [docs/relay-function-map.md](docs/relay-function-map.md), including
+the eight `Rf` values and the coil indices, but this driver does not implement it
+yet: feedback resistors, boost, bias and filters become available only when a
+semantic layer is built on top of this one.
 
 The driver is advertised through the `scietex.hal.current_amplifier.drivers`
 entry-point group as `ebic_modbus_v1_preamp`, so
