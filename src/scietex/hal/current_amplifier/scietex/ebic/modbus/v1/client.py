@@ -3,11 +3,11 @@
 The firmware in ``ebic_control`` exposes seventeen relay outputs and the
 communication settings that reach them. It has no ADC, DAC, measurement, status
 or unlock register, so this driver implements the relay layer. It declares only
-what is knowable without the relay map: the pre-amp's 5 V clip point, the
+what the raw coil layer alone can declare: the pre-amp's 5 V clip point, the
 booster's +/-10 V linear range, and the physical presence of the Overcurrent
-comparator. It declares no selectable control, because the relay-to-function map
-is pending and the ``Rf`` values are unknown, so enumerating
-``feedback_resistor`` would invent data.
+comparator. The relay-to-function map now fixes the selectable controls, but this
+driver still addresses raw coils, so the semantic layer built on it
+(``semantic.EBICModbusV1Amplifier``) declares them.
 
 The transport is the shared :class:`RS485Client`, which opens the port once per
 operation; ``connect`` therefore has nothing to open and every accessor is a
@@ -73,18 +73,18 @@ class EBICModbusV1Preamp(RS485Client, CurrentAmplifierProtocol):
     """Modbus RTU client for the EBIC v1.0 relay outputs.
 
     Attributes:
-        capabilities: The static analog geometry the board fixes regardless of
-            the relay map: the pre-amp clip point, the booster linear range and
-            the physical Overcurrent comparator. No selectable control is
-            declared, because the relay-to-function map is pending and the
-            ``Rf`` values are unknown.
+        capabilities: The static analog geometry the board fixes: the pre-amp
+            clip point, the booster linear range and the physical Overcurrent
+            comparator. No selectable control is declared here, because this
+            class drives coils rather than functions; the semantic layer owns the
+            relay map and declares the selectable groups.
     """
 
-    # Only the geometry that does not depend on the relay map is declared: the
-    # pre-amp clips at 5 V, the booster is linear over +/-10 V, and the
-    # Overcurrent comparator exists on the board but is unreachable over Modbus.
-    # Every selectable group stays unsupported until the relay-to-function map
-    # and the Rf values are known.
+    # Only geometry is declared on the raw driver: it speaks coil indices, not
+    # functions. The pre-amp clips at 5 V, the booster is linear over +/-10 V,
+    # and the Overcurrent comparator exists on the board but is unreachable over
+    # Modbus. The selectable groups are declared by the semantic layer, which
+    # owns the relay-to-function map and the Rf values.
     capabilities: ClassVar[CurrentAmplifierCapabilities] = CurrentAmplifierCapabilities(
         preamp=PreampCapabilities(max_output_v=5.0),
         output_voltage=OutputVoltageCapabilities(min_v=-10.0, max_v=10.0),

@@ -5,17 +5,26 @@ ion-collector current into a voltage through a transimpedance preamp, an optiona
 boost stage, DC bias injection, filtering and input-capacitance compensation.
 
 The package is split in two layers. The capability model and the driver contract
-in `scietex.hal.current_amplifier.base` are complete and usable now: they describe
-what an amplifier can do, what it currently reads, and the asynchronous methods a
-driver implements. The first hardware driver talks to the EBIC v1.0 preamp over
-Modbus RTU; it covers the device's relay outputs and communication settings,
-which is what that firmware implements. Mapping those relays to feedback
-resistors, boost, bias or filters is now documented in
-[docs/relay-function-map.md](docs/relay-function-map.md) but is not implemented
-in this driver yet, so the driver declares only the static analog geometry it can
-know without a semantic layer — the pre-amp +/-5 V clip point, the booster +/-10 V
-linear range, and the presence of the Overcurrent comparator — and it selects and
-reports nothing; its state snapshot is empty.
+in `scietex.hal.current_amplifier.base` are complete: they describe what an
+amplifier can do, what it currently reads, and the asynchronous methods a driver
+implements. Two drivers target the EBIC v1.0 preamp over Modbus RTU:
+
+- `EBICModbusV1Preamp` (entry point `ebic_modbus_v1_preamp`) is the raw relay
+  driver: it exposes the seventeen relay coils and the communication settings,
+  which is what the firmware implements. Its state snapshot is empty and it
+  declares only the static analog geometry — the pre-amp +/-5 V clip point, the
+  booster +/-10 V linear range, and the presence of the Overcurrent comparator.
+- `EBICModbusV1Amplifier` (entry point `ebic_modbus_v1`) is the semantic layer
+  built on those coils. It owns the relay-to-function map and implements the
+  amplifier contract: feedback resistor, boost gain, DC bias enable and input
+  compensation enable are selectable and readable, and `read_data()` decodes the
+  coil pattern into an `AmplifierState`.
+
+The relay-to-function map is documented in
+[docs/relay-function-map.md](docs/relay-function-map.md). The semantic layer still
+cannot report or control what the board does not expose: bandwidth, filters,
+output inversion, bias level, compensation level and every measurement stay
+unsupported, with `None` fields in the state rather than invented values.
 
 ## Status
 
@@ -24,8 +33,9 @@ reports nothing; its state snapshot is empty.
 | Capability model (`base.capabilities`) | Complete |
 | State snapshot (`base.data`) | Complete |
 | Driver contract (`base.protocol`) | Complete |
-| Driver registry (`registry`) | Complete, one driver advertised |
-| EBIC v1.0 preamp (`scietex.ebic.modbus.v1`) | Complete: relay layer and communication settings |
+| Driver registry (`registry`) | Complete, two drivers advertised |
+| EBIC v1.0 preamp (`scietex.ebic.modbus.v1`) | Complete: relay driver plus semantic amplifier |
+| Semantic amplifier (`EBICModbusV1Amplifier`) | Complete: Rf, boost gain, bias and compensation enables, state decode |
 
 ## Install
 
@@ -78,10 +88,38 @@ async def main(amp: CurrentAmplifierProtocol) -> None:
 asyncio.run(main(amplifier))
 ```
 
-`amplifier` is a driver instance. The EBIC v1.0 driver accepts commands through
-its relay methods but reports no amplifier value, so `read_data()` returns an
-empty snapshot; callers that need a populated snapshot must wait for the semantic
-driver layer or supply their own driver.
+`amplifier` is a driver instance. With the raw `EBICModbusV1Preamp`,
+`read_data()` returns an empty snapshot and commands go through its relay
+methods; use the semantic `EBICModbusV1Amplifier` when you want the amplifier
+contract. It drives the same coils through the function map:
+
+```python
+from scietex.hal.current_amplifier.scietex.ebic.modbus.v1 import (
+    EBICModbusV1Amplifier,
+)
+from scietex.hal.serial import ModbusSerialConnectionConfig
+
+amp = EBICModbusV1Amplifier(
+    ModbusSerialConnectionConfig(port="/dev/ttyUSB0", framer="RTU")
+)
+
+await amp.connect()
+try:
+    await amp.select_feedback_resistor(1_000_000.0)  # 1 MΩ, low-Z channel
+    await amp.set_boost_gain(10.0)
+    await amp.set_dc_bias(True)
+    state = await amp.read_data()
+    print(state.feedback_resistor_ohm, state.boost_gain, state.dc_bias_enabled)
+finally:
+    await amp.close()
+```
+
+Relay 13 (bias/compensation source) and relay 3 (booster source) are not
+contract members, so they are exposed as extension methods:
+`get_bias_compensation_source` / `set_bias_compensation_source` and
+`get_booster_source` / `set_booster_source`. The layer never writes relay 13
+implicitly; it leaves the firmware's Manual source in place unless the caller
+asks otherwise.
 
 Where an operation is advertised, the capability set answers whether it is
 writable; where a value is available, the snapshot carries it. The two are
@@ -242,21 +280,41 @@ finally:
   accepts only 9600, 14400, 19200, 38400, 57600 or 115200 and writes the index,
   never the rate.
 
-The driver declares only the static analog geometry: `preamp.max_output_v = 5.0`,
-`output_voltage` over +/-10 V, and `input_overcurrent =
-IndicationCapabilities(present=True, read=False)`. Every `supports_*`/`can_*`
-property stays `False`, and `read_data()` returns an `AmplifierState` whose fields
-are all `None` with an empty filter tuple: the firmware has no measurement or
-status register, so `None` is not zero. The relay-to-function map is now
-documented in [docs/relay-function-map.md](docs/relay-function-map.md), including
-the eight `Rf` values and the coil indices, but this driver does not implement it
-yet: feedback resistors, boost, bias and filters become available only when a
-semantic layer is built on top of this one.
+The raw `EBICModbusV1Preamp` declares only the static analog geometry:
+`preamp.max_output_v = 5.0`, `output_voltage` over +/-10 V, and
+`input_overcurrent = IndicationCapabilities(present=True, read=False)`. Every
+`supports_*`/`can_*` property stays `False`, and `read_data()` returns an
+`AmplifierState` whose fields are all `None` with an empty filter tuple: the
+firmware has no measurement or status register, so `None` is not zero.
 
-The driver is advertised through the `scietex.hal.current_amplifier.drivers`
-entry-point group as `ebic_modbus_v1_preamp`, so
-`registry.discover_drivers()` returns it and `registry.resolve_driver()` loads
-it by name.
+The semantic `EBICModbusV1Amplifier` layers the relay map on those coils and
+declares the selectable controls the map fixes:
+
+- `preamp.feedback_resistor` over the eight `Rf` values, readable and writable.
+- `boost.gain` over `(1.0, 3.0, 10.0, 30.0)`, with `default_gain = 1.0`.
+- `dc_bias.enabled` (relay 4) and `input_compensation.enabled` (relay 17),
+  readable and writable.
+
+`read_data()` decodes the coil pattern into `AmplifierState` for those four
+functions; every other field stays `None`. A pattern that selects no single
+resistor of the active channel, or that does not hold the gain relays one-hot,
+decodes to `None` there, and the matching strict getter raises
+`UnexpectedResponse`. Writes validate before any bus traffic and are
+break-before-make where the map requires it: a same-bank `Rf` change releases the
+old resistor first, and a gain change releases the old stage before engaging the
+new one.
+
+Still unsupported on this board, and therefore absent from both drivers:
+bandwidth, filters, output inversion, bias level, compensation level and every
+measurement. Relay 13 (bias/compensation source) and relay 3 (booster source) are
+not contract members; the semantic layer exposes them only as the extension
+methods described in [Usage](#usage), and never writes relay 13 implicitly.
+
+Both drivers are advertised through the
+`scietex.hal.current_amplifier.drivers` entry-point group: `ebic_modbus_v1_preamp`
+for `EBICModbusV1Preamp` and `ebic_modbus_v1` for `EBICModbusV1Amplifier`, so
+`registry.discover_drivers()` returns both and `registry.resolve_driver()` loads
+each by name.
 
 ## Testing
 

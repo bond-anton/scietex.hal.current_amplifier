@@ -1,8 +1,9 @@
 # EBIC v1.0 preamp: analog architecture
 
 Reference for the analog signal chain of the `EBIC_Preamp` v1.0 board and the
-consequences it has for the semantic amplifier layer that will sit on top of the
-relay driver in `scietex.ebic.modbus.v1`.
+consequences it has for the semantic amplifier layer
+(`EBICModbusV1Amplifier`) that sits on top of the relay driver in
+`scietex.ebic.modbus.v1`.
 
 ## 1. Scope
 
@@ -85,8 +86,10 @@ A transimpedance stage, current to voltage, driven from a single BNC input.
   pre-amplifier.
 
 Whether closing two `Rf` relays in the same channel in parallel is intended
-(summed conductance, parallel resistance) or undefined is a bench question; the
-model assumes exactly one `Rf` relay per active channel is closed. See §11.
+(summed conductance, parallel resistance) or undefined is a bench question. The
+driver takes the strict reading: every write leaves exactly one `Rf` per bank
+engaged, and a readback naming zero or several resistors of the active channel
+decodes to `None`. See §11.
 
 ## 4. Stage 2 - booster
 
@@ -100,7 +103,10 @@ pre-amp.
 - Powered from **+/-12 V**; the output is linear over **+/-10 V**.
 
 Whether the gain relays are break-before-make, and therefore whether a gain change
-glitches the output, is not stated; see §11.
+glitches the output, is not stated by the source. The driver does not rely on it:
+it sequences a gain change break-before-make, releasing the old stage before
+engaging the new one. The physical glitch on the bench is still unmeasured
+(§11).
 
 ## 5. Bias and compensation
 
@@ -248,9 +254,9 @@ since a signal can exist without being readable.
 | Contract member | Mapping for this board | Notes |
 | --- | --- | --- |
 | `output_voltage.min_v` / `max_v` | `-10.0` / `+10.0` | Static geometry of the booster's linear range |
-| `boost.gain` | `SelectableCapabilities(access=Access(read=True, write=True), options=(1.0, 3.0, 10.0, 30.0))` | Readable and writable through the gain relays; ×1 is all gain relays off. Known, not implemented in the driver yet |
+| `boost.gain` | `SelectableCapabilities(access=Access(read=True, write=True), options=(1.0, 3.0, 10.0, 30.0))` | Readable and writable through the gain relays; ×1 is all gain relays off. Implemented by `EBICModbusV1Amplifier` |
 | `boost.default_gain` | `1.0` | Unit gain at power-on |
-| `preamp.feedback_resistor` | `SelectableCapabilities` over `(1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0, 100_000_000.0, 1_000_000_000.0, 10_000_000_000.0)` | The single selectable pre-amp control; low-Z {1 kΩ … 1 MΩ}, high-Z {10 MΩ … 10 GΩ}. Coil mapping known, not implemented in the driver yet |
+| `preamp.feedback_resistor` | `SelectableCapabilities` over `(1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0, 100_000_000.0, 1_000_000_000.0, 10_000_000_000.0)` | The single selectable pre-amp control; low-Z {1 kΩ … 1 MΩ}, high-Z {10 MΩ … 10 GΩ}. Implemented by `EBICModbusV1Amplifier`; a change within a bank or across banks is break-before-make |
 | `preamp.max_output_v` | `5.0` | Static geometry: pre-amp clip point, where Overcurrent trips |
 | `preamp.range` | no longer a contract member | Derived: `min(preamp.max_output_v, amplifier_swing / G) / Rf` |
 | `input_overcurrent` | `IndicationCapabilities(present=True, read=False)` | Comparator exists on the board, unreachable over Modbus (§9) |
@@ -292,12 +298,30 @@ than in the contract.
 from `feedback_resistor_ohm`, `boost_gain` and the clip limits, and it is not
 readable on this board anyway.
 
-### Empty state snapshot and derived quantities
+### State snapshot and derived quantities
 
-`read_data()` returns an `AmplifierState` with every field `None` and an empty
-filter tuple. By the contract's own definition (`base/data.py`), `None` means
-"this driver cannot report the field" — not zero, not off — so this snapshot is
-correct for a board with no ADC and no status register.
+The raw `EBICModbusV1Preamp` returns an `AmplifierState` with every field `None`
+and an empty filter tuple. By the contract's own definition (`base/data.py`),
+`None` means "this driver cannot report the field" — not zero, not off — so this
+snapshot is correct for a board with no ADC and no status register.
+
+The semantic `EBICModbusV1Amplifier` decodes the coil readback into that same
+snapshot: it fills `feedback_resistor_ohm`, `boost_gain`, `dc_bias_enabled` and
+`input_compensation_enabled`, and leaves every measured quantity `None` and the
+filter tuple empty. A coil pattern that does not name exactly one resistor of the
+active channel, or whose gain relays are not one-hot, yields `None` for that
+field; the strict getter raises `UnexpectedResponse` rather than guessing.
+
+### Chosen driver defaults (D1, D3)
+
+- **D1 — board assumptions.** `RelayMapAssumptions(out2_is_low_z=True,
+  booster_source_tracks_channel=True)`: OUT2 is the low-Z output, and relay 3 is
+  steered to follow the selected channel. Both are inference, not firmware fact,
+  so they are injectable and pending bench confirmation.
+- **D3 — break-before-make.** Gain changes and in-bank `Rf` changes release the
+  old stage before engaging the new one, so the driver never presents two gain
+  stages or two same-bank `Rf` relays at once. Cross-bank `Rf` changes keep a
+  feedback path engaged throughout.
 
 The derived helpers remain computable from the capability set alone once the `Rf`
 values are known: `total_transconductance(feedback_resistor_ohm, boost_gain)`,
@@ -309,16 +333,26 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
 
 ## 11. Open items
 
+### Resolved in code (with assumption)
+
+- [x] OUT1/OUT2 ↔ channel correspondence: assumed OUT2 is the low-Z output
+      (`out2_is_low_z=True`); pending bench confirmation (§8).
+- [x] Relay 3 tracking: assumed it follows the selected channel
+      (`booster_source_tracks_channel=True`); pending bench confirmation (§8).
+- [x] Gain break-before-make: the driver sequences gain and in-bank `Rf` changes
+      break-before-make, so it needs no guarantee from the relays (§4).
+
+### Still open in hardware
+
 - [ ] Pre-amp sign convention: inverting or non-inverting, confirmed on the bench
       (§6).
-- [ ] OUT1/OUT2 ↔ channel correspondence; the power-on defaults are only
-      self-consistent if OUT2 is the low-Z output (§8).
-- [ ] Whether relay 3 must track the selected channel or is a free control (§8).
+- [ ] Bench confirmation of the `out2_is_low_z` and
+      `booster_source_tracks_channel` assumptions (§8).
 - [ ] What drives the DAC path (relay 13) and whether it is reachable over Modbus
       (§9).
 - [ ] Behaviour when two `Rf` relays in one channel are closed simultaneously:
-      parallel resistors (summed conductance) or undefined (§3).
-- [ ] Whether the gain relays are break-before-make: output glitch during a gain
-      change (§4).
+      parallel resistors (summed conductance) or undefined; the driver forbids it,
+      but the physical intent is unresolved (§3).
+- [ ] Output glitch actually produced by a gain change on the bench (§4).
 - [ ] Whether the Overcurrent signal is brought out to a connector a gateway could
       read (§9).

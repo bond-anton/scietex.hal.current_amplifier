@@ -39,7 +39,9 @@ the function convention above (GPIO = 0 engages the function):
 A driver API that takes a boolean "enable" must therefore invert for every relay
 except relay 12. This is the most error-prone fact in the map. The input-register
 mirror reports the same coil value, so a 1 read from register `36 + n` also means
-the relay is de-energised, not that the feature is active.
+the relay is de-energised, not that the feature is active. The driver encodes the
+polarity in `relaymap.coil_level` / `relaymap.relay_engaged`, never in the coil
+write path.
 
 Writing coil value 1 to all 17 coils (the power-up state, and what the firmware
 loads when the EEPROM is blank) yields: Low-Z channel, 1 kΩ `Rf`, gain ×1, bias
@@ -132,24 +134,51 @@ such, not fact from the source.
    the least sensitive setting.
 4. With relay 3 at its default (OUT2 → booster), the power-on state is only
    self-consistent if OUT2 is the low-Z output. The source does not state which
-   output is which. *Inference; recorded as an open item, not resolved.*
+   output is which. *Inference; resolved in code as the assumption
+   `RelayMapAssumptions(out2_is_low_z=True)`, pending bench confirmation.*
 5. Relay 3 must logically agree with relays 1/2, otherwise the booster amplifies
    the unselected channel, but the source calls it independent and does not
-   define the required correspondence. *Inference; open item.*
+   define the required correspondence. *Inference; resolved in code as the
+   assumption `RelayMapAssumptions(booster_source_tracks_channel=True)`, pending
+   bench confirmation.*
 
 ## Open items for the driver
 
-- [ ] OUT1/OUT2 ↔ channel correspondence.
-- [ ] Whether relay 3 must track the channel or is a free control.
+### Resolved in code (with assumption)
+
+- [x] **Relay 13 source select.** Taken as option A: exposed as the non-contract
+      extension methods `get_bias_compensation_source` /
+      `set_bias_compensation_source` on `EBICModbusV1Amplifier`, not as a member
+      of `CurrentAmplifierCapabilities`. The layer never writes relay 13
+      implicitly, so it stays at the firmware's Manual source until a caller
+      selects otherwise.
+- [x] **OUT1/OUT2 ↔ channel correspondence.** Assumed `OUT2` is the low-Z output:
+      `RelayMapAssumptions(out2_is_low_z=True)`. Pending bench confirmation.
+- [x] **Whether relay 3 tracks the channel.** Assumed it must:
+      `RelayMapAssumptions(booster_source_tracks_channel=True)`, so a channel
+      change steers relay 3 to the matching booster input. Pending bench
+      confirmation.
+- [x] **Two `Rf` relays closed in one channel.** The driver enforces exactly one
+      `Rf` per bank on every write; a readback that names zero or several
+      resistors of the active channel decodes to `None`, and the strict getter
+      raises `UnexpectedResponse`.
+- [x] **Gain / in-bank `Rf` break-before-make.** The transition engine releases
+      the old stage before engaging the new one, so a gain change or a same-bank
+      `Rf` change is break-before-make.
+
+### Still open in hardware
+
 - [ ] What drives the DAC path (relay 13) and whether it is reachable over
       Modbus.
-- [ ] Behaviour of two `Rf` relays closed in one channel.
-- [ ] Whether the gain relays are break-before-make.
+- [ ] Bench confirmation of `out2_is_low_z` and `booster_source_tracks_channel`.
+- [ ] Physical behaviour when two `Rf` relays are closed at once: the code
+      forbids it, but whether parallel summing is intended is still unknown.
 - [ ] Whether the Overcurrent comparator is brought out to a connector.
 
 ## Consequences for the capability contract
 
-No design changes here; this is what the map now fixes:
+The semantic layer (`EBICModbusV1Amplifier`) now implements the map; this is what
+it fixes:
 
 - `PreampCapabilities.feedback_resistor.options` =
   `(1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0, 100_000_000.0, 1_000_000_000.0, 10_000_000_000.0)`
@@ -159,11 +188,18 @@ No design changes here; this is what the map now fixes:
   `default_gain = 1.0` is exactly the all-relays-off state; no separate "gain 1"
   relay exists.
 - `DcBiasCapabilities.enabled` ← relay 4; compensation `enabled` ← relay 17.
+- Implemented and readable through `read_data()`: feedback resistor, boost gain,
+  DC bias enable and input compensation enable.
 - Still unsupported on this board: bandwidth, filters, invert, bias level,
   compensation level, and any measurement.
-- **Contract gap:** relay 13 (bias/compensation source select) has no member in
-  `CurrentAmplifierCapabilities`. It is a real control the semantic layer will
-  have to express somehow; this is flagged here, not added.
+- **Relay 13 resolved as option A:** the shared bias/compensation source select
+  has no member in `CurrentAmplifierCapabilities`, so it is exposed only as the
+  non-contract `get_bias_compensation_source` / `set_bias_compensation_source`
+  extension and is never written implicitly. Relay 3 is likewise a non-contract
+  `get_booster_source` / `set_booster_source` extension.
+- **Chosen code defaults:** `RelayMapAssumptions(out2_is_low_z=True,
+  booster_source_tracks_channel=True)`, break-before-make ordering for gain and
+  in-bank `Rf` changes, and exactly one `Rf` per bank on every write.
 - The full-scale current `min(5, 10/G) / Rf` is derived in
   [amplifier-architecture.md §7](amplifier-architecture.md#7-limits-and-full-scale-current);
   it is not restated here.

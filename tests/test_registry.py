@@ -33,7 +33,7 @@ def test_discover_drivers_lists_the_ebic_preamp():
     """The EBIC v1.0 relay driver is advertised under its entry point name."""
     drivers = discover_drivers()
 
-    assert set(drivers) == {"ebic_modbus_v1_preamp"}
+    assert set(drivers) == {"ebic_modbus_v1", "ebic_modbus_v1_preamp"}
     # The entry point loads the installed package while the test may import
     # the same module through ``src``; compare the qualified name, not identity.
     assert drivers["ebic_modbus_v1_preamp"].__qualname__ == (
@@ -62,4 +62,4 @@ def test_resolve_unknown_driver_raises_with_available_names():
 
     message = str(excinfo.value)
     assert "scietex.hal.current_amplifier.drivers" in message
-    assert "available: ebic_modbus_v1_preamp" in message
+    assert "available: ebic_modbus_v1, ebic_modbus_v1_preamp" in message
