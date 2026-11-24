@@ -7,17 +7,21 @@ compensation and a state snapshot. Every write is validated before any bus
 traffic. ``Rf`` changes are make-before-break: the target resistor engages
 before the old one releases, so the write order never commands the pre-amp
 feedback loop open and the transimpedance stage is not deliberately left to
-saturate against its output clamp. No settle delay is inserted, so whether the
-new relay actually closes before the old opens depends on the relay operate and
-release times. Two ``Rf`` of one bank share both terminals, so the transient
-parallel pair is electrically defined. Booster gain changes follow the same
-engage-before-release order: the gain relays switch parallel ``Rg`` resistors of
-an instrumentation amplifier, so a transiently closed pair forms a higher gain,
-``G1 + G2 - 1``, rather than an intermediate one. ``Rg`` open is exactly unity
-gain, so the booster cannot saturate in either state. The readback still codes a
-gain one-hot, so a closed pair decodes to an undefined gain until the old relay
-releases. The active channel therefore always has at least one engaged ``Rf``:
-exactly one at rest, transiently two during a same-bank swap, never zero.
+saturate against its output clamp. The driver also waits ``relay_settle_s``
+after the make write — :data:`DEFAULT_RELAY_SETTLE_S` by default, sized from the
+IM03 operate and bounce maxima — so the new relay is closed before the channel
+switch and before the old relay leaves. The physical overlap is therefore
+deterministic rather than a function of relay operate and release times. Two
+``Rf`` of one bank share both terminals, so the transient parallel pair is
+electrically defined. Booster gain changes follow the same
+engage-before-release order with the same settle delay: the gain relays switch
+parallel ``Rg`` resistors of an instrumentation amplifier, so a transiently
+closed pair forms a higher gain, ``G1 + G2 - 1``, rather than an intermediate
+one. ``Rg`` open is exactly unity gain, so the booster cannot saturate in
+either state. The readback still codes a gain one-hot, so a closed pair decodes
+to an undefined gain until the old relay releases. The active channel therefore
+always has at least one engaged ``Rf``: exactly one at rest, transiently two
+during a same-bank swap, never zero.
 
 The relay map records the firmware's relay-3 correspondence: ``OUT2`` is the
 low-Z output and ``OUT1`` the high-Z output. The firmware calls relay 3
@@ -83,6 +87,27 @@ from .relaymap import (
 
 _BOOST_GAINS: tuple[float, ...] = (1.0, 3.0, 10.0, 30.0)
 """The four booster gains, the domain of :meth:`EBICModbusV1Amplifier.set_boost_gain`."""
+
+# The board uses TE/AXICOM IM03 relays (2 form C, monostable, 5 VDC coil). TE
+# datasheet 108-98001 Rev. M, "Contact Data", gives an operate time of max 3 ms
+# and a contact bounce time of max 5 ms, so a coil is reliably closed only 8 ms
+# after it is driven. The optional coil-suppression diode delays release, which
+# widens a make-before-break overlap, so it does not raise this floor.
+DEFAULT_RELAY_SETTLE_S: float = 0.008
+"""Default delay after a make write before the writes that depend on it, in seconds."""
+
+
+class _SettleBarrier:
+    """Marker a step plan places where the relay settle delay belongs."""
+
+    __slots__ = ()
+
+
+_SETTLE_BARRIER = _SettleBarrier()
+"""The settle barrier singleton; identity, not equality, identifies it in a plan."""
+
+_PlanStep = tuple[Relay, bool] | _SettleBarrier
+"""One plan element: a relay write or a settle barrier."""
 
 
 class RelayAccess(Protocol):
@@ -171,6 +196,8 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             board's static output range and present-but-unreadable Overcurrent
             comparator.
         relays: The relay transport every operation is forwarded to.
+        relay_settle_s: The delay inserted after a make write before the writes
+            that depend on it, in seconds.
     """
 
     capabilities: ClassVar[CurrentAmplifierCapabilities] = CurrentAmplifierCapabilities(
@@ -197,12 +224,13 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
     )
 
     relays: RelayAccess
+    relay_settle_s: float
     _write_lock: asyncio.Lock
 
     # The signature mirrors the raw driver's four parameters and adds the
-    # injected transport keyword-only, which is needed for a driver that can
-    # run without a serial port.
-    def __init__(
+    # injected transport and the settle delay keyword-only, which a driver that
+    # can run without a serial port needs.
+    def __init__(  # noqa: PLR0913
         self,
         con_params: SerialConnectionConfig | ModbusSerialConnectionConfig | None = None,
         address: int = DEFAULT_SLAVE_ADDRESS,
@@ -210,6 +238,7 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         logger: Logger | None = None,
         *,
         relay_driver: RelayAccess | None = None,
+        relay_settle_s: float = DEFAULT_RELAY_SETTLE_S,
     ) -> None:
         """
         Initialize the amplifier.
@@ -222,11 +251,20 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             logger: Optional logger for raw transport diagnostics.
             relay_driver: A relay transport to drive instead of opening a serial
                 port. An in-memory fake uses this path.
+            relay_settle_s: Seconds to wait after a make write before the writes
+                that depend on it. ``0`` disables the wait.
 
         Raises:
             TypeError: If neither ``con_params`` nor ``relay_driver`` is given,
                 since there is then no transport to drive.
+            ValueError: If ``relay_settle_s`` is negative or not a number, before
+                any bus traffic.
         """
+        # The comparison is written so that a NaN settle time fails it too.
+        if not relay_settle_s >= 0:
+            raise ValueError(
+                f"relay_settle_s must be a non-negative number, got {relay_settle_s!r}"
+            )
         if relay_driver is None:
             if con_params is None:
                 raise TypeError("con_params or relay_driver is required")
@@ -241,6 +279,7 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
                 logger=logger,
             )
         self.relays = relay_driver
+        self.relay_settle_s = relay_settle_s
         self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
@@ -352,10 +391,12 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         Select one feedback resistor.
 
         A change engages the target resistor before it releases the old one, so
-        the active channel always keeps a feedback path. A cross-bank change
-        also switches the channel relays and steers the booster source between
-        the two ``Rf`` writes, so the amplifier follows the new channel while the
-        transient parallel pair holds the loop closed.
+        the active channel always keeps a feedback path. The driver then waits
+        ``relay_settle_s`` before the channel relays switch and the booster
+        source is steered, so the new relay has settled before the channel write
+        moves the circuit onto it. A cross-bank change therefore hands the loop
+        to a closed resistor, and the old resistor releases only after that. The
+        transient parallel pair holds the loop closed in the meantime.
 
         Args:
             resistance_ohm: One of ``RF_OHMS``, in ohm.
@@ -368,7 +409,7 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         """
         resistance = _feedback_resistance(resistance_ohm)
 
-        def plan(current: tuple[bool, ...]) -> list[tuple[Relay, bool]]:
+        def plan(current: tuple[bool, ...]) -> list[_PlanStep]:
             return self._feedback_steps(resistance, current)
 
         await self._transition("select feedback resistor", plan)
@@ -377,13 +418,15 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         """
         Set the booster gain.
 
-        A change engages the target gain relay before it releases the old one.
-        The gain relays switch parallel ``Rg`` elements, so the transient pair
-        overshoots upward to ``G1 + G2 - 1``: a ``×10`` ↔ ``×30`` change reaches
-        about ``×39``. Unity selects no relay, so moving to it only releases the
-        engaged one and never forms a pair. A failed release leaves the pair
-        engaged, which decodes as an undefined gain until the old relay is
-        released.
+        A change engages the target gain relay before it releases the old one,
+        and the driver waits ``relay_settle_s`` in between, so the new relay is
+        settled before the old one leaves. The gain relays switch parallel
+        ``Rg`` elements, so the transient pair overshoots upward to
+        ``G1 + G2 - 1``: a ``×10`` ↔ ``×30`` change reaches about ``×39`` while
+        the incoming relay settles. Unity selects no relay, so moving to it only
+        releases the engaged one and never forms a pair. A failed release leaves
+        the pair engaged, which decodes as an undefined gain until the old relay
+        is released.
 
         Args:
             gain: One of ``1.0``, ``3.0``, ``10.0`` or ``30.0``.
@@ -401,10 +444,12 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             )
         target = GAIN_RELAY[gain]
 
-        def plan(_current: tuple[bool, ...]) -> list[tuple[Relay, bool]]:
-            steps: list[tuple[Relay, bool]] = []
+        def plan(current: tuple[bool, ...]) -> list[_PlanStep]:
+            steps: list[_PlanStep] = []
             if target is not None:
                 steps.append((target, coil_level(target, True)))
+                if target not in engaged_relays(current):
+                    steps.append(_SETTLE_BARRIER)
             for relay in (Relay.GAIN_X3, Relay.GAIN_X10, Relay.GAIN_X30):
                 if relay is not target:
                     steps.append((relay, coil_level(relay, False)))
@@ -528,14 +573,16 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
 
     def _feedback_steps(
         self, resistance: int, current: tuple[bool, ...]
-    ) -> list[tuple[Relay, bool]]:
+    ) -> list[_PlanStep]:
         """Return the coil-level steps that select ``resistance`` from ``current``.
 
-        The target relay is engaged before every other ``Rf`` relay is released,
-        so a same-bank swap briefly closes the parallel pair and the feedback
-        loop never opens. Only the eight ``Rf`` relays are considered for
-        release. Deselecting every engaged relay would also switch off bias,
-        gain, compensation and the channel selectors.
+        The target relay is engaged first, followed by a settle barrier, so a
+        cross-bank change switches the channel only onto a closed resistor. Every
+        other ``Rf`` relay is released after that, so a same-bank swap briefly
+        closes the parallel pair and the feedback loop never opens. Only the
+        eight ``Rf`` relays are considered for release. Deselecting every
+        engaged relay would also switch off bias, gain, compensation and the
+        channel selectors.
         """
         target_relay = RF_RELAY[resistance]
         target_channel = RF_CHANNEL[target_relay]
@@ -543,9 +590,10 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         rf_relays = set(RF_RELAY.values())
         engaged_rf = [relay for relay in engaged_relays(current) if relay in rf_relays]
 
-        steps: list[tuple[Relay, bool]] = []
+        steps: list[_PlanStep] = []
         if target_relay not in engaged_rf:
             steps.append((target_relay, coil_level(target_relay, True)))
+            steps.append(_SETTLE_BARRIER)
         steps.append((Relay.CHANNEL_SELECT, CHANNEL_COILS[target_channel]))
         steps.append((Relay.DESELECTED_FEEDBACK, CHANNEL_COILS[target_channel]))
         steps.append((Relay.BOOST_SOURCE, BOOSTER_COILS[target_channel]))
@@ -557,19 +605,22 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
     async def _transition(
         self,
         operation: str,
-        plan: Callable[[tuple[bool, ...]], Iterable[tuple[Relay, bool]]],
+        plan: Callable[[tuple[bool, ...]], Iterable[_PlanStep]],
     ) -> None:
         """Read once, apply a coil-level plan, then verify the result.
 
         ``plan`` receives the readback the engine just took, so a plan that
         depends on the current state costs no second bus read. A failed write is
-        not retried: the half-applied vector is read back and reported.
+        not retried: the half-applied vector is read back and reported. A settle
+        barrier sleeps for ``relay_settle_s`` once a write has landed, and never
+        sleeps for a plan that writes nothing or when the delay is zero.
 
         Args:
             operation: The operation name carried by a
                 :class:`RelayTransitionError`.
             plan: Builds the steps from the current coil vector. Each step is a
-                relay and the raw coil level to drive it to.
+                relay and the raw coil level to drive it to, or the settle
+                barrier marker.
 
         Raises:
             RelayTransitionError: If a write raises or the readback after a
@@ -579,7 +630,12 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             current = list(await self.relays.read_relays())
             target = list(current)
             wrote = False
-            for relay, level in plan(tuple(current)):
+            for step in plan(tuple(current)):
+                if isinstance(step, _SettleBarrier):
+                    if wrote and self.relay_settle_s > 0:
+                        await asyncio.sleep(self.relay_settle_s)
+                    continue
+                relay, level = step
                 coil = coil_index(relay)
                 if target[coil] == level:
                     continue

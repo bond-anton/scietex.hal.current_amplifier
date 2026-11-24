@@ -9,6 +9,8 @@ index differ by one. Feedback relays are 5-12, gain relays are 14-16, and the
 bias/compensation source is relay 13 at coil 12.
 """
 
+import asyncio
+
 import pytest
 
 try:
@@ -67,6 +69,46 @@ except ModuleNotFoundError:
     )
 
 
+class TransitionLog:
+    """Ordered log of relay writes and settle sleeps for one test.
+
+    Attributes:
+        entries: ``("write", coil, level)`` and ``("sleep", seconds)`` tuples in
+            the order the driver produced them.
+        sleeps: The recorded sleep durations, in seconds.
+    """
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, int, bool] | tuple[str, float]] = []
+        self.sleeps: list[float] = []
+
+    def write(self, index: int, state: bool) -> None:
+        """Record one relay write."""
+        self.entries.append(("write", index, state))
+
+    def sleep(self, seconds: float) -> None:
+        """Record one settle sleep."""
+        self.entries.append(("sleep", seconds))
+        self.sleeps.append(seconds)
+
+
+@pytest.fixture(autouse=True)
+def transition_log(monkeypatch):
+    """Record ``asyncio.sleep`` calls instead of waiting, for every test.
+
+    The settle delay is a real 8 ms per barrier in production; the suite skips
+    it so a test that exercises many transitions stays fast, and so the delay
+    itself becomes observable next to the writes.
+    """
+    log = TransitionLog()
+
+    async def sleep(seconds: float) -> None:
+        log.sleep(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    return log
+
+
 class FakeRelayAccess:
     """In-memory relay transport that records reads and writes.
 
@@ -74,6 +116,7 @@ class FakeRelayAccess:
         coils: The current seventeen coil levels. Mutated by ``set_relay`` unless
             ``echo_only`` is set.
         writes: Every ``(index, state)`` handed to ``set_relay``, in order.
+        log: The order-preserving log of writes shared with the patched sleep.
         reads: The number of ``read_relays`` calls.
         fail_at: The one-based write ordinal that raises, or ``None``.
         echo_only: Whether a write is acknowledged without changing ``coils``.
@@ -85,9 +128,11 @@ class FakeRelayAccess:
         *,
         fail_at=None,
         echo_only=False,
+        log=None,
     ) -> None:
         self.coils = list(POWER_ON_COILS if coils is None else coils)
         self.writes: list[tuple[int, bool]] = []
+        self.log = TransitionLog() if log is None else log
         self.reads = 0
         self.fail_at = fail_at
         self.echo_only = echo_only
@@ -110,15 +155,16 @@ class FakeRelayAccess:
     async def set_relay(self, index: int, state: bool) -> None:
         """Record a write, optionally fail it, and apply it unless echoing only."""
         self.writes.append((index, state))
+        self.log.write(index, state)
         if self.fail_at is not None and len(self.writes) == self.fail_at:
             raise OSError(f"injected failure writing coil {index}")
         if not self.echo_only:
             self.coils[index] = state
 
 
-def _driver(fake) -> EBICModbusV1Amplifier:
+def _driver(fake, **kwargs) -> EBICModbusV1Amplifier:
     """Build a semantic driver over ``fake``, with no serial configuration."""
-    return EBICModbusV1Amplifier(relay_driver=fake)
+    return EBICModbusV1Amplifier(relay_driver=fake, **kwargs)
 
 
 def _coils(*engaged: Relay) -> list[bool]:
@@ -380,6 +426,127 @@ async def test_every_gain_change_closes_the_parallel_pair_before_opening_it():
 
     assert _assert_gain_make_before_break(sequences) is True
     assert _engaged_gains(fake.coils) == [Relay.GAIN_X3]
+
+
+# -- settle barrier ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_same_bank_feedback_swap_settles_between_make_and_break(transition_log):
+    """1 kOhm to 10 kOhm logs the engage write, the settle sleep, then the release."""
+    fake = FakeRelayAccess(log=transition_log)
+    driver = _driver(fake)
+
+    await driver.select_feedback_resistor(10_000)
+
+    assert transition_log.entries == [
+        ("write", 10, False),
+        ("sleep", 0.008),
+        ("write", 11, False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cross_bank_feedback_swap_settles_before_the_channel_writes(
+    transition_log,
+):
+    """The target engages and settles before relays 1-3 move the circuit onto it."""
+    fake = FakeRelayAccess(log=transition_log)
+    driver = _driver(fake)
+
+    await driver.select_feedback_resistor(10_000_000)
+
+    assert transition_log.entries == [
+        ("write", 7, False),
+        ("sleep", 0.008),
+        ("write", 0, False),
+        ("write", 1, False),
+        ("write", 2, False),
+        ("write", 11, False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gain_change_settles_between_make_and_break(transition_log):
+    """x10 to x30 logs the engage of coil 15, the settle sleep, then coil 14's release."""
+    fake = FakeRelayAccess(log=transition_log)
+    driver = _driver(fake)
+    await driver.set_boost_gain(10.0)
+    transition_log.entries.clear()
+
+    await driver.set_boost_gain(30.0)
+
+    assert transition_log.entries == [
+        ("write", 15, False),
+        ("sleep", 0.008),
+        ("write", 14, True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_gain_change_to_unity_has_no_barrier(transition_log):
+    """Unity only releases the engaged relay, so nothing is made and nothing settles."""
+    fake = FakeRelayAccess(_coils(Relay.GAIN_X10), log=transition_log)
+    driver = _driver(fake)
+
+    await driver.set_boost_gain(1.0)
+
+    assert transition_log.entries == [("write", 14, True)]
+    assert transition_log.sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_an_idempotent_call_neither_writes_nor_settles(transition_log):
+    """A repeat of the power-on selection produces zero writes and zero sleeps."""
+    fake = FakeRelayAccess(log=transition_log)
+    driver = _driver(fake)
+
+    await driver.select_feedback_resistor(1_000)
+    await driver.select_feedback_resistor(1_000)
+
+    assert transition_log.entries == []
+    assert fake.writes == []
+
+
+@pytest.mark.asyncio
+async def test_zero_settle_disables_the_barrier_and_keeps_the_write_order(
+    transition_log,
+):
+    """A zero settle time skips the sleep call and leaves the writes unchanged."""
+    fake = FakeRelayAccess(log=transition_log)
+    driver = _driver(fake, relay_settle_s=0)
+
+    await driver.select_feedback_resistor(10_000_000)
+
+    assert transition_log.sleeps == []
+
+    default_fake = FakeRelayAccess()
+    await _driver(default_fake).select_feedback_resistor(10_000_000)
+    assert fake.writes == default_fake.writes
+
+
+@pytest.mark.asyncio
+async def test_default_settle_is_the_im03_operate_plus_bounce_maximum(transition_log):
+    """The IM03 operate max 3 ms plus bounce max 5 ms is the default 8 ms wait."""
+    fake = FakeRelayAccess(log=transition_log)
+    driver = _driver(fake)
+
+    assert driver.relay_settle_s == 0.008
+
+    await driver.select_feedback_resistor(10_000)
+
+    assert transition_log.sleeps == [0.008]
+
+
+def test_a_negative_settle_time_is_rejected_before_io(transition_log):
+    """A negative settle time raises at construction, before any bus read or write."""
+    fake = FakeRelayAccess(log=transition_log)
+
+    with pytest.raises(ValueError, match="relay_settle_s"):
+        EBICModbusV1Amplifier(relay_driver=fake, relay_settle_s=-1)
+
+    assert fake.writes == []
+    assert fake.reads == 0
 
 
 # -- idempotence and validation --------------------------------------------

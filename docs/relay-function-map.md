@@ -19,6 +19,18 @@ The current HEAD is `94f5068`, which only removes the rendered PDF snapshot of t
 map from the repository. This file is a transcription for driver use: the
 firmware repository is authoritative.
 
+## Relay part
+
+Every relay on the board is a TE/AXICOM **IM03**: 2 form C (DPDT), monostable,
+5 VDC coil, 178 Ω ±10 %, 140 mW. Monostable, not latching — latching is a
+separate coil-code option in the same family. The timing figures used by the
+driver come from TE datasheet **108-98001 Rev. M, 04-2011, page 1, "Contact
+Data"**: operate time max 3 ms, contact bounce max 5 ms, release time max 3 ms
+(5 ms with a suppression diode), typical 1 ms each. The datasheet does not
+specify a maximum switching/repetition rate. The 8 ms settle floor
+(`operate + bounce`) and its use are derived in
+[amplifier-architecture.md §4](amplifier-architecture.md#relay-settle-time--teaxicom-im03).
+
 ## Coil polarity and power-on state
 
 Every relay is de-energised when its GPIO is 1 and energised when its GPIO is 0.
@@ -199,9 +211,10 @@ statement with the driver policy built on it.
       ×3 ↔ ×30 → ×32, and ×10 ↔ ×30 → ×39, the worst case. ×1 is `Rg` open and
       forms no pair — it releases only, since it is the all-relays-open state with
       no engage step. The output transient on a gain change is a hardware property
-      the driver cannot measure; downstream consumers should expect it, and the
-      ordering is a sequencing guarantee, not a timing one — no settle delay is
-      inserted.
+      the driver cannot measure; downstream consumers should expect it. A settle
+      barrier of 8 ms (IM03 operate + bounce maxima) is awaited after the engage
+      write and before the dependent writes, configurable via `relay_settle_s`, so
+      the make-before-break overlap is deterministic rather than relay-dependent.
 - [x] **Overcurrent.** No ADC, no discrete-input function code and no MCU input
       pin reach the signal, so it is unobservable through this firmware; whether
       it reaches a connector is hardware-documentation only.
@@ -232,8 +245,10 @@ it fixes:
   (`relaymap.BOOSTER_COILS`; low-Z → relay-3 coil 1, high-Z → coil 0), with
   `set_booster_source(out2)` as the manual override; make-before-break ordering
   for both `Rf` and gain changes (both are parallel networks; the gain transient
-  is a higher `G1 + G2 - 1`, and ×1 releases only); at rest, exactly one `Rf` per
-  bank and at most one gain relay engaged.
+  is a higher `G1 + G2 - 1`, and ×1 releases only). After the engage write the
+  driver awaits a settle barrier of 8 ms (IM03 operate + bounce maxima), sized by
+  `relay_settle_s` and disabled with `0`; at rest, exactly one `Rf` per bank and
+  at most one gain relay engaged.
 - The full-scale current `min(5, 10/G) / Rf` is derived in
   [amplifier-architecture.md §7](amplifier-architecture.md#7-limits-and-full-scale-current);
   it is not restated here.

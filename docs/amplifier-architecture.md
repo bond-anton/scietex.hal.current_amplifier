@@ -65,7 +65,8 @@ Relay-controlled elements in the diagram, counted:
 
 All 17 relay outputs are accounted for by this description; see §8 for the relay
 budget and [relay-function-map.md](relay-function-map.md) for the per-relay
-functions.
+functions. Every relay is a TE/AXICOM **IM03** (2 form C, monostable, 5 VDC coil);
+the switching timing and the settle delay built on it are in §4.
 
 ## 3. Stage 1 - pre-amplifier
 
@@ -149,14 +150,51 @@ A gain change engages the target gain relay first, then releases the others.
 `×1` is the all-relays-open state and the power-on default working gain, so it
 has no engage step: it only releases whichever gain relay was engaged.
 
-**Write order is not relay timing.** If the new relay closes before the old one
-releases, the output overshoots to `G1 + G2 - 1`. If the old relay releases
-first — the usual outcome, since release is typically faster than operate — the
-gain momentarily becomes unity instead, a dip rather than an overshoot. Command
-order biases the first case and never guarantees it. The driver issues these
-writes back to back with no settle delay, so which transient actually occurs
-depends on the two relays' operate and release times; only a settle delay sized
-from measured relay timing would make the physical overlap deterministic.
+**Command order is made physical by a settle delay.** If the new relay closes
+before the old one releases, the output overshoots to `G1 + G2 - 1`. If the old
+relay releases first, the gain momentarily becomes unity instead — a dip rather
+than an overshoot. The driver now selects the first case by construction. It
+places a barrier immediately after the last engage write of a plan and awaits it
+before any write that depends on it: for a gain change that is the release of
+the other gain relays; for a cross-bank `Rf` change it is the channel-select
+write and the release of the old `Rf`. The barrier is `relay_settle_s`
+(`DEFAULT_RELAY_SETTLE_S = 0.008`, 8 ms), a keyword-only argument of
+`EBICModbusV1Amplifier`; `0` disables it and a negative value raises
+`ValueError`. It is `asyncio.sleep`, never a blocking sleep. The delay is
+per-transition: a plan with no engage step — gain to ×1, or a repair where the
+target relay is already engaged — has no barrier and no delay, and a plan that
+produces no writes produces no delay.
+
+### Relay settle time — TE/AXICOM IM03
+
+The relays are TE/AXICOM **IM03**, 2 form C (DPDT), monostable, 5 VDC coil. The
+switching figures come from TE datasheet **108-98001 Rev. M, 04-2011, page 1,
+"Contact Data"**:
+
+| Parameter | Typical | Maximum |
+| --- | --- | --- |
+| Operate time | 1 ms | 3 ms |
+| Contact bounce | 1 ms | 5 ms |
+| Release time, no coil suppression diode | 1 ms | 3 ms |
+| Release time, with a suppression diode across the coil | 3 ms | 5 ms |
+
+The datasheet does not specify a maximum switching/repetition rate.
+
+A relay is reliably closed only after both the operate time and the contact
+bounce have elapsed, so the floor is `3 ms + 5 ms = 8 ms`. The suppression-diode
+figure delays only the *release*, which lengthens make-before-break rather than
+shortening it, so it does not raise the floor. The 8 ms is a conservative
+worst-case sum: TE publishes the two maxima separately and does not state that
+they occur on the same operation.
+
+**Cost against the bus.** A `FC05` request is 8 bytes and the device echoes 8
+bytes, so one await round-trip is `16 bytes * 10 bits / baud` at 8N1. At the
+19200 default that is about 8.3 ms, already covering the floor on its own; the
+barrier adds its delay unconditionally on top, making the guarantee independent
+of baud. At 57600 (about 2.8 ms) or 115200 (about 1.4 ms) the bus alone would
+not cover it — that is the case the delay exists for. The guarantee the driver
+makes is only that the delay is at least the computed floor; the driver does not
+measure relay behaviour.
 
 ## 5. Bias and compensation
 
@@ -404,8 +442,11 @@ happens after the transition completes.
   changes keep a feedback path engaged; the gain relays switch parallel `Rg`
   elements, so a gain change forms a higher parallel gain `G1 + G2 - 1` (upward,
   not intermediate), and ×1 has no engage step because it is the all-relays-open
-  state — it releases the engaged relay only. The ordering is not a timing
-  guarantee (no settle delay, §4).
+  state — it releases the engaged relay only. The ordering is made physical by a
+  settle barrier: after the last engage write the driver awaits `relay_settle_s`
+  (`DEFAULT_RELAY_SETTLE_S = 0.008`, 8 ms, the IM03 operate + bounce maximum)
+  before any dependent write, so the overshoot case is selected by construction
+  rather than by relay timing; `0` disables it (§4).
 
 The derived helpers remain computable from the capability set alone once the `Rf`
 values are known: `total_transconductance(feedback_resistor_ohm, boost_gain)`,
@@ -429,7 +470,10 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
       terminals), so the driver engages the target relay before releasing the
       others and the loop is never commanded open. A gain change engages the target
       gain relay first and releases the rest; ×1 has no engage step and only
-      releases the engaged relay, since it is the all-relays-open state (§4).
+      releases the engaged relay, since it is the all-relays-open state. A settle
+      barrier of 8 ms (IM03 operate + bounce maxima) is awaited after the engage
+      write, so the overlap is deterministic; it is configurable via
+      `relay_settle_s` (§4).
 
 ### Resolved (firmware evidence)
 
@@ -467,8 +511,7 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
       parallel `Rg` elements, so a transient pair is a higher gain, not an
       intermediate one — `G1 + G2 - 1`, upward for every direction: ×3 ↔ ×10 →
       ×12, ×3 ↔ ×30 → ×32, ×10 ↔ ×30 → ×39. ×1 is `Rg` open and forms no pair.
-      The shape is ordering-based, not timing-guaranteed: command order biases the
-      overshoot, but release-first would instead give a unity-gain dip, and the two
-      writes carry no settle delay, so physical overlap depends on relay operate
-      and release times (§4). `Rg` open is unity gain, so the booster cannot
-      saturate either way.
+      The overshoot, not a unity dip, is selected by construction: the driver
+      awaits the 8 ms IM03 settle barrier after the engage write and before the
+      release, so the new relay is closed before the old one opens (§4). `Rg`
+      open is unity gain, so the booster cannot saturate either way.

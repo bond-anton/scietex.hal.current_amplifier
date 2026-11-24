@@ -100,7 +100,8 @@ from scietex.hal.current_amplifier.scietex.ebic.modbus.v1 import (
 from scietex.hal.serial import ModbusSerialConnectionConfig
 
 amp = EBICModbusV1Amplifier(
-    ModbusSerialConnectionConfig(port="/dev/ttyUSB0", framer="RTU")
+    ModbusSerialConnectionConfig(port="/dev/ttyUSB0", framer="RTU"),
+    relay_settle_s=0.008,  # 8 ms engage barrier; 0 disables it
 )
 
 await amp.connect()
@@ -310,9 +311,12 @@ relays switch parallel `Rg` elements, so the transient is an upward overshoot to
 would instead give a unity-gain dip, and `Rg` open is unity gain, so the booster
 cannot saturate either way. ×1 has no engage step: it only releases the engaged
 gain relay, since it is the all-relays-open state. At rest the active channel has
-exactly one engaged `Rf` and at most one gain relay engaged. The ordering is a
-sequencing guarantee, not a timing one: the writes carry no settle delay, so
-physical overlap depends on relay operate and release times.
+exactly one engaged `Rf` and at most one gain relay engaged. The ordering is made
+physical by a settle delay: after the engage write the driver awaits
+`relay_settle_s` (default 8 ms, sized from the IM03 operate and bounce maxima)
+before the dependent writes, so the overlap is deterministic; `0` disables it.
+The delay is per-transition, so a plan with no engage step (`×1`) or no writes
+adds none.
 
 Still unsupported on this board, and therefore absent from both drivers:
 bandwidth, filters, output inversion, bias level, compensation level and every
