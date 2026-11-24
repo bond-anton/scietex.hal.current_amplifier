@@ -108,29 +108,55 @@ pre-amp.
 
 The two selectors use the same ordering policy, because both are parallel
 networks. The four same-bank `Rf` resistors share both terminals, and the
-booster's gain relays add parallel elements, so closing a gain relay alongside
-another is an electrically defined state — a parallel gain — exactly as two
-closed same-bank `Rf` relays form `R1*R2/(R1+R2)`. Both selectors are therefore
-**make-before-break**: the driver engages the target relay first, then releases
-the others, so the transconductance or feedback loop is never commanded open.
+booster's gain relays switch parallel `Rg` elements of an instrumentation
+amplifier, so closing a gain relay alongside another is an electrically defined
+state — a second `Rg` in parallel — exactly as two closed same-bank `Rf` relays
+form `R1*R2/(R1+R2)`. Both selectors are therefore **make-before-break**: the
+driver engages the target relay first, then releases the others.
 
 A same-bank `Rf` change engages the target relay first, then writes the channel
 relays and relay 3, then releases the old `Rf`. The intermediate value is a small
 step — 1 kΩ || 10 kΩ = 909 Ω, about 10 % — and remains linear. Cross-bank `Rf`
 changes already kept a feedback path engaged and still do.
 
+**Gain-change transient.** The booster is an instrumentation amplifier whose
+gain follows `G = 1 + k/Rg` for a single gain-setting resistor `Rg`. Closing two
+`Rg` relays puts the resistors in parallel, so
+
+```
+1/Rg_p = 1/Rg1 + 1/Rg2
+G_p    = 1 + k/Rg_p = 1 + k/Rg1 + k/Rg2 = 1 + (G1 - 1) + (G2 - 1) = G1 + G2 - 1
+```
+
+The transient pair is therefore a **higher** gain than either endpoint, never an
+intermediate one, and it is always upward regardless of which direction the gain
+is changed:
+
+- ×3 ↔ ×10 passes through ×12 (20 % over ×10);
+- ×3 ↔ ×30 passes through ×32 (6.7 % over ×30);
+- ×10 ↔ ×30 passes through ×39 (30 % over ×30);
+- ×1 ↔ any gain forms no pair: ×1 is `Rg` open, so nothing is engaged and
+  nothing releases — no overshoot.
+
+`Rg` open is exactly unity gain, so the booster cannot be driven into open-loop
+saturation in either state; the in-amp's internal feedback loops stay closed
+through the gain-setting network. The reason to prefer make-before-break on gain
+is transient magnitude, not loop integrity: the overshoot stays within 1.3× of
+the higher endpoint, whereas releasing first collapses the gain to unity — a 30×
+dip for a ×30 selection.
+
 A gain change engages the target gain relay first, then releases the others.
 `×1` is the all-relays-open state and the power-on default working gain, so it
-has no engage step: it only releases whichever gain relay was engaged. Because
-the booster always has a closed feedback path, a gain step's transient is the
-parallel combination of the two gain elements together with the gain change
-itself, but the loop is never commanded open.
+has no engage step: it only releases whichever gain relay was engaged.
 
-**Write order is not relay timing.** The driver issues these writes back to back
-with no settle delay, so whether the new relay actually closes before the old
-one opens depends on the two relays' operate and release times. The ordering
-removes the deliberate break; it does not prove the physical overlap.
-Guaranteeing the overlap would need a delay sized from measured relay timing.
+**Write order is not relay timing.** If the new relay closes before the old one
+releases, the output overshoots to `G1 + G2 - 1`. If the old relay releases
+first — the usual outcome, since release is typically faster than operate — the
+gain momentarily becomes unity instead, a dip rather than an overshoot. Command
+order biases the first case and never guarantees it. The driver issues these
+writes back to back with no settle delay, so which transient actually occurs
+depends on the two relays' operate and release times; only a settle delay sized
+from measured relay timing would make the physical overlap deterministic.
 
 ## 5. Bias and compensation
 
@@ -223,6 +249,11 @@ I_fullscale(G) = min(5, 10/G) / Rf_ch
 
 The pre-amp is the binding limit only at `G = 1`; at `G = 3, 10, 30` the booster
 output clips first.
+
+The binding table describes settled gains. During a gain change the transient
+pair reaches `G1 + G2 - 1`, so a ×10 ↔ ×30 change momentarily reaches ×39; an
+output already within 30 % of the ±10 V rail clips during that overlap even
+though the settled gain would not.
 
 Full-scale input current per resistor, computed by `I = min(5, 10/G) / Rf`
 with the `Rf` values from the relay map.
@@ -370,10 +401,11 @@ happens after the transition completes.
 - **D3 — both selectors make-before-break.** `Rf` and gain are parallel networks,
   so both changes engage the target relay before releasing the others. A same-bank
   `Rf` change forms a defined parallel resistance (`R1*R2/(R1+R2)`) and cross-bank
-  changes keep a feedback path engaged; a gain change forms a parallel gain, and
-  ×1 has no engage step because it is the all-relays-open state — it releases the
-  engaged relay only. The loop is never commanded open; the ordering is not a
-  timing guarantee (no settle delay, §4).
+  changes keep a feedback path engaged; the gain relays switch parallel `Rg`
+  elements, so a gain change forms a higher parallel gain `G1 + G2 - 1` (upward,
+  not intermediate), and ×1 has no engage step because it is the all-relays-open
+  state — it releases the engaged relay only. The ordering is not a timing
+  guarantee (no settle delay, §4).
 
 The derived helpers remain computable from the capability set alone once the `Rf`
 values are known: `total_transconductance(feedback_resistor_ohm, boost_gain)`,
@@ -431,10 +463,12 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
       because the resistors share both terminals and make-before-break keeps the
       loop closed (§4). That transient state is electrically defined
       (`R1*R2/(R1+R2)`) but is never a target selection (§3).
-- [x] Gain-change transient: resolved by make-before-break. The driver no longer
-      commands the booster's feedback path open, so the rail-slam / overload-recovery
-      transient is not deliberately produced. A gain step still produces a
-      transient — the intermediate value is the parallel gain and the gain itself
-      changes — but the loop stays closed. The mitigation is ordering-based, not
-      timing-guaranteed: the two writes carry no settle delay, so physical overlap
-      depends on relay operate and release times (§4).
+- [x] Gain-change transient: resolved by make-before-break. The gain relays switch
+      parallel `Rg` elements, so a transient pair is a higher gain, not an
+      intermediate one — `G1 + G2 - 1`, upward for every direction: ×3 ↔ ×10 →
+      ×12, ×3 ↔ ×30 → ×32, ×10 ↔ ×30 → ×39. ×1 is `Rg` open and forms no pair.
+      The shape is ordering-based, not timing-guaranteed: command order biases the
+      overshoot, but release-first would instead give a unity-gain dip, and the two
+      writes carry no settle delay, so physical overlap depends on relay operate
+      and release times (§4). `Rg` open is unity gain, so the booster cannot
+      saturate either way.

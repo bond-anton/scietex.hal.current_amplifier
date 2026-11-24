@@ -11,12 +11,13 @@ saturate against its output clamp. No settle delay is inserted, so whether the
 new relay actually closes before the old opens depends on the relay operate and
 release times. Two ``Rf`` of one bank share both terminals, so the transient
 parallel pair is electrically defined. Booster gain changes follow the same
-engage-before-release order: the gain network is parallel too, so a transiently
-closed pair is an electrically defined state and the booster's feedback path is
-never commanded open. The readback still codes a gain one-hot, so a closed pair
-decodes to an undefined gain until the old relay releases. The active channel
-therefore always has at least one engaged ``Rf``: exactly one at rest,
-transiently two during a same-bank swap, never zero.
+engage-before-release order: the gain relays switch parallel ``Rg`` resistors of
+an instrumentation amplifier, so a transiently closed pair forms a higher gain,
+``G1 + G2 - 1``, rather than an intermediate one. ``Rg`` open is exactly unity
+gain, so the booster cannot saturate in either state. The readback still codes a
+gain one-hot, so a closed pair decodes to an undefined gain until the old relay
+releases. The active channel therefore always has at least one engaged ``Rf``:
+exactly one at rest, transiently two during a same-bank swap, never zero.
 
 The relay map records the firmware's relay-3 correspondence: ``OUT2`` is the
 low-Z output and ``OUT1`` the high-Z output. The firmware calls relay 3
@@ -377,9 +378,12 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         Set the booster gain.
 
         A change engages the target gain relay before it releases the old one.
-        The gain network is parallel, so the transient pair is an electrically
-        defined state and the booster's feedback path is never commanded open.
-        Unity selects no relay, so moving to it only releases the engaged one.
+        The gain relays switch parallel ``Rg`` elements, so the transient pair
+        overshoots upward to ``G1 + G2 - 1``: a ``×10`` ↔ ``×30`` change reaches
+        about ``×39``. Unity selects no relay, so moving to it only releases the
+        engaged one and never forms a pair. A failed release leaves the pair
+        engaged, which decodes as an undefined gain until the old relay is
+        released.
 
         Args:
             gain: One of ``1.0``, ``3.0``, ``10.0`` or ``30.0``.

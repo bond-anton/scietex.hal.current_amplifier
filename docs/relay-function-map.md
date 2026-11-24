@@ -70,9 +70,9 @@ off, compensation off, manual source.
 | 11 | 10 | PB2 | 46 | §03 | 10 kΩ resistor | ON | OFF | |
 | 12 | 11 | PA8 | 47 | §03 | 1 kΩ resistor | OFF | ON | Only inverted function: at GPIO = 1 relay 12 is de-energised yet the 1 kΩ resistor is connected. |
 | 13 | 12 | PA9 | 48 | §05 | simultaneous source select for bias and compensation (DAC vs Manual) | DAC | Manual | Switches bias and compensation together: GPIO = 1 = manual (power-on default), GPIO = 0 = DAC. The DAC is an external device; the firmware never drives it and no Modbus write reaches it, so the level is not settable through the driver. |
-| 14 | 13 | PA10 | 49 | §04 | 3 kΩ resistor; gain ×3 | ON | OFF | With relays 14–16 all off the booster gain is ×1; the gain network is parallel, so simultaneous closure is a defined parallel gain (board design). |
-| 15 | 14 | PA11 | 50 | §04 | 665 Ω resistor; gain ×10 | ON | OFF | |
-| 16 | 15 | PA12 | 51 | §04 | 205 Ω resistor; gain ×30 | ON | OFF | |
+| 14 | 13 | PA10 | 49 | §04 | 3 kΩ resistor; gain ×3 | ON | OFF | With relays 14–16 all off the booster gain is ×1. The relays switch parallel `Rg` elements of an instrumentation amplifier, so simultaneous closure forms `G1 + G2 - 1` — a higher gain, not an intermediate one — a defined parallel `Rg` (board design). |
+| 15 | 14 | PA11 | 50 | §04 | 665 Ω resistor; gain ×10 | ON | OFF | Shares the parallel `Rg` network with relays 14 and 16; a simultaneous closure forms `G1 + G2 - 1`. |
+| 16 | 15 | PA12 | 51 | §04 | 205 Ω resistor; gain ×30 | ON | OFF | Shares the parallel `Rg` network with relays 14 and 15; a simultaneous closure forms `G1 + G2 - 1`. |
 | 17 | 16 | PA15 | 52 | §05 | compensation enable | ON | OFF | |
 
 ### Coil map provenance
@@ -128,8 +128,9 @@ selection.
 
 Three relays, one-hot at rest: relay 14 → ×3, relay 15 → ×10, relay 16 → ×30,
 and none closed → ×1. The coding is one-hot, not binary; ×1 is the absence of all
-three. A change passes through a parallel gain under make-before-break — an
-electrically defined but non-target state.
+three. The relays switch parallel `Rg` elements of an instrumentation amplifier,
+so a change passes through `G1 + G2 - 1` under make-before-break — a higher gain,
+not an intermediate one — an electrically defined but non-target state.
 
 ## Derived driver invariants
 
@@ -192,12 +193,15 @@ statement with the driver policy built on it.
       `None`.
 - [x] **Gain and `Rf` make-before-break.** Both selectors drive parallel networks,
       so both engage the target relay before releasing the others. A same-bank `Rf`
-      change keeps the shared-terminal `R1*R2/(R1+R2)` parallel transient; a gain
-      change produces a defined parallel gain, and ×1 releases only, since it is
-      the all-relays-open state with no engage step. The loop is never commanded
-      open. The output transient on a gain change is a hardware property the driver
-      cannot measure; downstream consumers should expect it, and the ordering is a
-      sequencing guarantee, not a timing one — no settle delay is inserted.
+      change keeps the shared-terminal `R1*R2/(R1+R2)` parallel transient; the gain
+      relays switch parallel `Rg` elements, so a gain change passes through
+      `G1 + G2 - 1` — a higher gain, not an intermediate one: ×3 ↔ ×10 → ×12,
+      ×3 ↔ ×30 → ×32, and ×10 ↔ ×30 → ×39, the worst case. ×1 is `Rg` open and
+      forms no pair — it releases only, since it is the all-relays-open state with
+      no engage step. The output transient on a gain change is a hardware property
+      the driver cannot measure; downstream consumers should expect it, and the
+      ordering is a sequencing guarantee, not a timing one — no settle delay is
+      inserted.
 - [x] **Overcurrent.** No ADC, no discrete-input function code and no MCU input
       pin reach the signal, so it is unobservable through this firmware; whether
       it reaches a connector is hardware-documentation only.
@@ -227,9 +231,9 @@ it fixes:
 - **Chosen code defaults:** the booster always tracks the selected channel
   (`relaymap.BOOSTER_COILS`; low-Z → relay-3 coil 1, high-Z → coil 0), with
   `set_booster_source(out2)` as the manual override; make-before-break ordering
-  for both `Rf` and gain changes (both are parallel networks, so the loop is never
-  commanded open; ×1 releases only); at rest, exactly one `Rf` per bank and at
-  most one gain relay engaged.
+  for both `Rf` and gain changes (both are parallel networks; the gain transient
+  is a higher `G1 + G2 - 1`, and ×1 releases only); at rest, exactly one `Rf` per
+  bank and at most one gain relay engaged.
 - The full-scale current `min(5, 10/G) / Rf` is derived in
   [amplifier-architecture.md §7](amplifier-architecture.md#7-limits-and-full-scale-current);
   it is not restated here.

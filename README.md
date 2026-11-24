@@ -304,13 +304,15 @@ decodes to `None` there, and the matching strict getter raises
 `UnexpectedResponse`. Writes validate before any bus traffic. Both selectors are
 make-before-break, because both drive parallel networks: a same-bank `Rf` change
 engages the target relay first — the transient is the defined parallel pair
-`R1*R2/(R1+R2)` — and a gain change engages the target gain relay first — the
-transient is the parallel gain. The loop is never commanded open. ×1 has no engage
-step: it only releases the engaged gain relay, since it is the all-relays-open
-state. At rest the active channel has exactly one engaged `Rf` and at most one
-gain relay engaged. The ordering is a sequencing guarantee, not a timing one: the
-writes carry no settle delay, so physical overlap depends on relay operate and
-release times.
+`R1*R2/(R1+R2)` — and a gain change engages the target gain relay first — the gain
+relays switch parallel `Rg` elements, so the transient is an upward overshoot to
+`G1 + G2 - 1` (about ×39 for ×10 ↔ ×30), not an intermediate gain; release-first
+would instead give a unity-gain dip, and `Rg` open is unity gain, so the booster
+cannot saturate either way. ×1 has no engage step: it only releases the engaged
+gain relay, since it is the all-relays-open state. At rest the active channel has
+exactly one engaged `Rf` and at most one gain relay engaged. The ordering is a
+sequencing guarantee, not a timing one: the writes carry no settle delay, so
+physical overlap depends on relay operate and release times.
 
 Still unsupported on this board, and therefore absent from both drivers:
 bandwidth, filters, output inversion, bias level, compensation level and every
