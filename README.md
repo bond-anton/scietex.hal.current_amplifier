@@ -225,8 +225,8 @@ Some rules the model enforces:
 `EBICModbusV1Preamp` drives the `EBIC_Preamp` board (vendor `SCIETEX.RU`,
 STM32F411) over Modbus RTU. The register map is transcribed from the firmware;
 the device exposes seventeen relay outputs and the two settings that reach them,
-and nothing else. There is no ADC, DAC, measurement, status or unlock register,
-so the driver does not invent one.
+and nothing else. There is no ADC, no DAC register, no measurement, status or
+unlock register, so the driver does not invent one.
 
 The analog architecture behind the relay bank is described in [docs/amplifier-architecture.md](docs/amplifier-architecture.md), and the per-relay function and coil map in [docs/relay-function-map.md](docs/relay-function-map.md).
 

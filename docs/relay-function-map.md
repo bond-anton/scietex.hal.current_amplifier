@@ -69,7 +69,7 @@ off, compensation off, manual source.
 | 10 | 9 | PB1 | 45 | §03 | 100 kΩ resistor | ON | OFF | |
 | 11 | 10 | PB2 | 46 | §03 | 10 kΩ resistor | ON | OFF | |
 | 12 | 11 | PA8 | 47 | §03 | 1 kΩ resistor | OFF | ON | Only inverted function: at GPIO = 1 relay 12 is de-energised yet the 1 kΩ resistor is connected. |
-| 13 | 12 | PA9 | 48 | §05 | simultaneous source select for bias and compensation (DAC vs Manual) | DAC | Manual | Switches bias and compensation together: GPIO = 1 = manual, GPIO = 0 = DAC. |
+| 13 | 12 | PA9 | 48 | §05 | simultaneous source select for bias and compensation (DAC vs Manual) | DAC | Manual | Switches bias and compensation together: GPIO = 1 = manual (power-on default), GPIO = 0 = DAC. The DAC is an external device; the firmware never drives it and no Modbus write reaches it, so the level is not settable through the driver. |
 | 14 | 13 | PA10 | 49 | §04 | 3 kΩ resistor; gain ×3 | ON | OFF | With relays 14–16 all off the booster gain is ×1; simultaneous closure of several stages is undefined in the source records. |
 | 15 | 14 | PA11 | 50 | §04 | 665 Ω resistor; gain ×10 | ON | OFF | |
 | 16 | 15 | PA12 | 51 | §04 | 205 Ω resistor; gain ×30 | ON | OFF | |
@@ -115,9 +115,11 @@ asserted by the firmware.
 | high-Z channel | 10 GΩ, 1 GΩ, 100 MΩ, 10 MΩ | 5–8 |
 | low-Z channel | 1 MΩ, 100 kΩ, 10 kΩ, 1 kΩ | 9–12 |
 
-Exactly one resistor per channel is intended. The source does not define the
-result of two being closed at once; parallel summing is an assumption, not a
-fact.
+Exactly one resistor per channel is intended. Combined feedback resistors are out
+of scope for this driver: the contract exposes the eight discrete `Rf` values and
+the driver enforces exactly one engaged `Rf` per bank on every write. The
+physical result of two closed same-bank relays is not needed because the
+combination is unsupported by decision.
 
 ## Booster gain coding
 
@@ -149,7 +151,7 @@ statement with the driver policy built on it.
    independent in hardware; the non-contract `set_booster_source(out2)` overrides
    the tracking.
 
-## Open items for the driver
+## Driver questions, resolved
 
 ### Resolved by firmware documentation
 
@@ -173,22 +175,22 @@ statement with the driver policy built on it.
       `set_bias_compensation_source` on `EBICModbusV1Amplifier`, not as a member
       of `CurrentAmplifierCapabilities`. The layer never writes relay 13
       implicitly, so it stays at the firmware's Manual source until a caller
-      selects otherwise.
+      selects otherwise. The DAC on the other branch is an external device the
+      firmware never drives and no Modbus write reaches (see "Source" and the
+      relay-13 row above).
 - [x] **Two `Rf` relays closed in one channel.** The driver enforces exactly one
       `Rf` per bank on every write; a readback that names zero or several
       resistors of the active channel decodes to `None`, and the strict getter
-      raises `UnexpectedResponse`.
+      raises `UnexpectedResponse`. Combined feedback resistors are unsupported by
+      decision, so their physical behaviour is not needed.
 - [x] **Gain / in-bank `Rf` break-before-make.** The transition engine releases
       the old stage before engaging the new one, so a gain change or a same-bank
-      `Rf` change is break-before-make.
-
-### Still open in hardware
-
-- [ ] What drives the DAC path (relay 13) and whether it is reachable over
-      Modbus.
-- [ ] Physical behaviour when two `Rf` relays are closed at once: the code
-      forbids it, but whether parallel summing is intended is still unknown.
-- [ ] Whether the Overcurrent comparator is brought out to a connector.
+      `Rf` change is break-before-make. The resulting output transient is a
+      hardware property the driver cannot measure; downstream consumers should
+      expect it.
+- [x] **Overcurrent.** No ADC, no discrete-input function code and no MCU input
+      pin reach the signal, so it is unobservable through this firmware; whether
+      it reaches a connector is hardware-documentation only.
 
 ## Consequences for the capability contract
 

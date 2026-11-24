@@ -85,11 +85,12 @@ A transimpedance stage, current to voltage, driven from a single BNC input.
 - Bias voltage, when enabled, is applied to the non-inverting (`+`) input of the
   pre-amplifier.
 
-Whether closing two `Rf` relays in the same channel in parallel is intended
-(summed conductance, parallel resistance) or undefined is a bench question. The
-driver takes the strict reading: every write leaves exactly one `Rf` per bank
-engaged, and a readback naming zero or several resistors of the active channel
-decodes to `None`. See §11.
+Combined feedback resistors are explicitly out of scope for this driver. The
+contract exposes exactly the eight discrete `Rf` values, and the driver enforces
+exactly one engaged `Rf` per bank on every write; a readback naming zero or
+several resistors of the active channel decodes to `None`. The physical result of
+two closed same-bank relays is not needed, because the combination is unsupported
+by decision (§11).
 
 ## 4. Stage 2 - booster
 
@@ -102,20 +103,26 @@ pre-amp.
   (reference) input and **subtracted** from the pre-amplifier signal.
 - Powered from **+/-12 V**; the output is linear over **+/-10 V**.
 
-Whether the gain relays are break-before-make, and therefore whether a gain change
-glitches the output, is not stated by the source. The driver does not rely on it:
-it sequences a gain change break-before-make, releasing the old stage before
-engaging the new one. The physical glitch on the bench is still unmeasured
-(§11).
+A gain change produces a transient on the output while the feedback path is
+momentarily interrupted. Break-before-make is the driver's only lever: it
+guarantees the shortest no-feedback window and never presents two gain stages at
+once, but it cannot remove the glitch, which is a hardware property. The driver
+cannot measure it (no ADC), and adding an inter-write delay would be a timing
+guess. Downstream consumers should expect a transient on gain changes; this is an
+accepted risk (§11).
 
 ## 5. Bias and compensation
 
-Both are applied from external analog voltages, but the board is not limited to a
-manual path: relay 13 selects DAC or manual as the source for bias and
-compensation together, so a DAC path exists. There is still **no level control**
-over Modbus for either: the board can enable or disable each (relays 4 and 17)
-and select the source (relay 13), nothing more. What drives the DAC path, and
-whether it is reachable over Modbus, is an open item (§11).
+Both are applied from external analog voltages. Relay 13 selects, for bias and
+compensation together, between an external DAC and a manual source. The DAC is an
+external device the MCU never drives: the firmware instantiates only `USART1`,
+enables no ADC/DAC/I2C/SPI peripheral, and rejects Modbus writes to every holding
+register beyond the two communication settings. The board boots with relay 13
+selecting the manual source (`DEFAULT_RELAY_LEVEL 1U`, `globals.h:78`). There is
+**no level control** over Modbus for either signal: the board can enable or
+disable each (relays 4 and 17) and select the source (relay 13), nothing more, so
+`dc_bias.level` and `compensation.level` remain permanently unsupported for this
+board and firmware (§9, §11).
 
 | Signal | Enable relay | Reaches pre-amp `+` | Reaches booster ref | Effect |
 | --- | --- | --- | --- | --- |
@@ -135,30 +142,41 @@ that is harmless at unity gain pushes the output past the +/-10 V linear range;
 
 ## 6. Signal equations
 
-Pre-amp output, with the active channel's feedback resistor `Rf_ch`:
+Stage 1 is an inverting transimpedance amplifier; stage 2 is an inverting booster
+whose reference input sums bias and compensation. With the active channel's
+feedback resistor `Rf_ch`, the pre-amp output is
 
 ```
-Vpre = +/- Rf_ch * Iin + Vbias
+Vpre = -Rf_ch * Iin + Vbias
 ```
 
-Booster output, subtracting bias and compensation on its reference input:
+The booster's reference input is `Vref = Vbias + Vcomp`, and it amplifies the
+difference between that reference and its inverting input:
 
 ```
-Vout = G * (Vpre - Vbias - Vcomp)
-     = G * (+/- Rf_ch * Iin - Vcomp)
+Vout = G * (Vref - Vpre)
 ```
 
-Bias cancels between the two stages. Compensation nulls the input current at the
-output when
+Substituting `Vpre` and `Vref`:
 
 ```
-Iin = +/- Vcomp / Rf_ch
+Vout = G * ((Vbias + Vcomp) - (-Rf_ch * Iin + Vbias))
+     = G * (Rf_ch * Iin + Vcomp)
 ```
 
-**Sign convention.** The leading `+/-` depends on whether the pre-amp is wired
-inverting or non-inverting, which the description does not state. The magnitudes
-above are independent of that choice; the polarity of the output relative to
-`Iin` is not. This is an open item (§11) until confirmed on the bench.
+The two inversions cancel: the pre-amp inverts `Iin` and the booster inverts
+again, so the overall stage is non-inverting with respect to `Iin`. `Vbias`
+appears in both stages with opposite sign and cancels. Compensation enters `Vout`
+with a `+`, so it nulls a negative input current:
+
+```
+Iin = -Vcomp / Rf_ch
+```
+
+**Sign convention (confirmed).** The pre-amp is inverting and the booster is
+inverting with bias and compensation summed on its reference, so the overall
+output is non-inverting with respect to `Iin`; `Vbias` cancels. This is fixed by
+the board design, not assumed, and is recorded in §11.
 
 ## 7. Limits and full-scale current
 
@@ -223,7 +241,7 @@ to a coil or register cannot be observed over the bus.
 
 | Quantity | Present on board | Reachable over Modbus |
 | --- | --- | --- |
-| Overcurrent (pre-amp `+/-5 V`) | yes (comparator output) | no - not connected to any register |
+| Overcurrent (pre-amp `+/-5 V`) | signal may exist (comparator) | no - no ADC, no discrete-input function code, no input pin |
 | Output overload / clipping | yes (analog behaviour) | no - no measurement path |
 | Bias level | external voltage | no - no readback, no level control |
 | Compensation level | external voltage | no - no readback, no level control |
@@ -233,14 +251,19 @@ to a coil or register cannot be observed over the bus.
 | Invert | absent | absent |
 | Voltage / current measurements | absent | absent |
 
-The Overcurrent comparator output exists physically and is **not reportable over
-Modbus**; it matters only if the board brings it out to a connector a gateway
-could read (open item, §11).
+The Overcurrent comparator output may exist physically, but this firmware could
+not report it even if it does: there is no ADC, no discrete-input object (the
+implemented function codes are `0x01, 0x03, 0x04, 0x05, 0x06, 0x0F, 0x10`, with
+no `0x02`), and every pin is a relay output, SWD, or USART, with no MCU input
+allocated to the signal. `IndicationCapabilities(present=True, read=False)` is
+final. Whether the signal reaches a connector is hardware-documentation only and
+cannot affect the driver contract (§11).
 
-Bias and compensation can come from a manual source or from a DAC path, selected
-together by relay 13, so a DAC path exists. What drives it and whether it is
-reachable over Modbus is an open item (§11). The *level* of either is still not
-settable over Modbus.
+Bias and compensation come from a manual source or from an external DAC, selected
+together by relay 13. The MCU never drives the DAC — only `USART1` is
+instantiated, and Modbus writes beyond the two communication settings are
+rejected — so the DAC level is not settable or readable over Modbus, and the
+`*.level` members stay permanently unsupported (§11).
 
 ## 10. Mapping to the HAL capability contract
 
@@ -333,7 +356,7 @@ values are known: `total_transconductance(feedback_resistor_ohm, boost_gain)`,
 depend on a populated snapshot; `max_input_current_a` returns `None` when the
 pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
 
-## 11. Open items
+## 11. Resolved questions and accepted risks
 
 ### Resolved (firmware / policy)
 
@@ -345,15 +368,40 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
 - [x] Gain break-before-make: the driver sequences gain and in-bank `Rf` changes
       break-before-make, so it needs no guarantee from the relays (§4).
 
-### Still open in hardware
+### Resolved (firmware evidence)
 
-- [ ] Pre-amp sign convention: inverting or non-inverting, confirmed on the bench
-      (§6).
-- [ ] What drives the DAC path (relay 13) and whether it is reachable over Modbus
-      (§9).
-- [ ] Behaviour when two `Rf` relays in one channel are closed simultaneously:
-      parallel resistors (summed conductance) or undefined; the driver forbids it,
-      but the physical intent is unresolved (§3).
-- [ ] Output glitch actually produced by a gain change on the bench (§4).
-- [ ] Whether the Overcurrent signal is brought out to a connector a gateway could
-      read (§9).
+- [x] DAC path (relay 13): the DAC is an external device the MCU never drives.
+      The firmware enables no ADC/DAC/I2C/SPI peripheral and instantiates only
+      `USART1`; Modbus rejects writes beyond the two communication settings; the
+      EEPROM map holds only slave address, baud index and serial number. Relay 13
+      therefore selects between an external DAC and a manual source and boots on
+      the manual source (`DEFAULT_RELAY_LEVEL 1U`). `dc_bias.level` and
+      `compensation.level` are permanently unsupported, not "not yet
+      implemented"; the driver never writes relay 13 implicitly (§5, §9).
+- [x] Overcurrent: unobservable through this firmware. There is no ADC, no
+      discrete-input function code, and no MCU pin allocated to the signal, so
+      `IndicationCapabilities(present=True, read=False)` is final. Whether it
+      reaches a connector is hardware-documentation only and cannot affect the
+      driver contract (§9).
+
+### Resolved (board design)
+
+- [x] Sign convention: the pre-amp is inverting and the booster is inverting with
+      bias and compensation summed on its reference, so the two inversions cancel
+      and the overall stage is non-inverting with respect to `Iin`; `Vbias`
+      cancels. The derivation is in §6.
+
+### Settled by policy
+
+- [x] Parallel `Rf`: combined feedback resistors are out of scope. The contract
+      exposes the eight discrete values, enforces exactly one engaged `Rf` per
+      bank, and decodes a doubly-engaged bank to `None`. The physical result of
+      two closed same-bank relays is not needed because the combination is
+      unsupported by decision (§3).
+
+### Accepted risks
+
+- [x] Gain-change glitch: break-before-make gives the shortest no-feedback window
+      and never presents two gain stages at once, but the transient is a hardware
+      property the driver cannot measure (no ADC). Downstream consumers should
+      expect a transient on gain changes (§4).
