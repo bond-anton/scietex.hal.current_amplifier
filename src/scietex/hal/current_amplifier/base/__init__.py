@@ -20,11 +20,14 @@ Classes:
     IndicationCapabilities: A read-only status flag.
     OutputVoltageCapabilities: Static output voltage swing limits.
     PreampCapabilities: Preamp range and feedback-resistor selection.
+    RegisterMapIncomplete: A register needed by the operation is not mapped.
     SelectableCapabilities: An access plus the values it accepts.
+    UnexpectedResponse: A response cannot belong to the register it answers.
 
 Modules:
     capabilities: Defines the capability model.
     data: Defines the state snapshot and the filter setting.
+    errors: Defines the errors shared by drivers.
     protocol: Defines the `CurrentAmplifierProtocol` driver contract.
 """
 
@@ -42,6 +45,7 @@ from .capabilities import (
     SelectableCapabilities,
 )
 from .data import AmplifierState, FilterSetting
+from .errors import RegisterMapIncomplete, UnexpectedResponse
 from .protocol import CurrentAmplifierProtocol
 
 __all__ = [
@@ -58,5 +62,7 @@ __all__ = [
     "IndicationCapabilities",
     "OutputVoltageCapabilities",
     "PreampCapabilities",
+    "RegisterMapIncomplete",
     "SelectableCapabilities",
+    "UnexpectedResponse",
 ]

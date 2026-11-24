@@ -7,12 +7,12 @@ boost stage, DC bias injection, filtering and input-capacitance compensation.
 The package is split in two layers. The capability model and the driver contract
 in `scietex.hal.current_amplifier.base` are complete and usable now: they describe
 what an amplifier can do, what it currently reads, and the asynchronous methods a
-driver implements. The vendor-neutral Modbus driver in
-`scietex.hal.current_amplifier.generic.modbus` is a skeleton: its structure, error
-handling and capability mapping are in place, but the device's register map has
-not been transcribed, so every register access raises `RegisterMapIncomplete`
-before any bus traffic starts. The driver is therefore not advertised through the
-`scietex.hal.current_amplifier.drivers` entry-point group either.
+driver implements. The first hardware driver talks to the EBIC v1.0 preamp over
+Modbus RTU; it covers the device's relay outputs and communication settings,
+which is what that firmware implements. Mapping those relays to preamp ranges,
+boost, bias or filters needs the board's relay table and is not part of this
+driver yet, so the driver advertises no amplifier capability and its state
+snapshot is empty.
 
 ## Status
 
@@ -21,8 +21,8 @@ before any bus traffic starts. The driver is therefore not advertised through th
 | Capability model (`base.capabilities`) | Complete |
 | State snapshot (`base.data`) | Complete |
 | Driver contract (`base.protocol`) | Complete |
-| Driver registry (`registry`) | Complete, no driver advertised yet |
-| Generic Modbus driver (`generic.modbus`) | Skeleton: register map missing |
+| Driver registry (`registry`) | Complete, one driver advertised |
+| EBIC v1.0 preamp (`scietex.ebic.modbus.v1`) | Complete: relay layer and communication settings |
 
 ## Install
 
@@ -75,9 +75,10 @@ async def main(amp: CurrentAmplifierProtocol) -> None:
 asyncio.run(main(amplifier))
 ```
 
-`amplifier` is a driver instance. The repository ships no working hardware
-driver yet, so the object is supplied by the application, by a subclass that
-implements the optional methods, or by a test double.
+`amplifier` is a driver instance. The EBIC v1.0 driver accepts commands through
+its relay methods but reports no amplifier value, so `read_data()` returns an
+empty snapshot; callers that need a populated snapshot must wait for the semantic
+driver layer or supply their own driver.
 
 Where an operation is advertised, the capability set answers whether it is
 writable; where a value is available, the snapshot carries it. The two are
@@ -160,46 +161,81 @@ Some rules the model enforces:
 - A `None` field in `AmplifierState` means the driver cannot report that value.
   It is not `0.0` and not `False`, so a caller must not substitute either.
 - `RegisterMapIncomplete` (a `RuntimeError`) means the register an operation needs
-  has no address or function code in `DEVICE_MAP`. The message names the register
-  and the file to fill in.
+  has no map entry. The message names the register and the missing detail.
 - `UnexpectedResponse` (an `OSError`) means a response cannot belong to the
   register it answers, such as a wrong register count.
 - `ValueError` comes from `total_transconductance` and `max_input_current_a` for a
   non-positive feedback resistor, and from `resolve_driver` for an unknown driver
   name; the message lists the available names.
 
-## The Modbus driver
+## EBIC v1.0 preamp
 
-`GenericModbusCurrentAmplifier` is a `scietex.hal.serial.RS485Client` subclass, so
-the shared client opens the port once per operation and `connect()` has nothing to
-open. Its capability set is empty and `DEVICE_MAP`, `STATUS_BITS` and
-`FILTER_TYPE_CODES` in `scietex/hal/current_amplifier/generic/modbus/registers.py`
-carry no device data yet.
+`EBICModbusV1Preamp` drives the `EBIC_Preamp` board (vendor `SCIETEX.RU`,
+STM32F411) over Modbus RTU. The register map is transcribed from the firmware;
+the device exposes seventeen relay outputs and the two settings that reach them,
+and nothing else. There is no ADC, DAC, measurement, status or unlock register,
+so the driver does not invent one.
+
+| Item | Value |
+| --- | --- |
+| Identity | `SCIETEX.RU` / `EBIC_Preamp`, version 1.0.0, 32-bit serial number |
+| Transport | Modbus RTU, 8N1, no flow control |
+| Defaults | slave address 2, baud index 2 (19200 baud) |
+| Holding registers | 0 = slave address, 1 = baud index, 10/11 = serial number (read only) |
+| Input registers | 0-34 identity, 35 constant 7, 36-52 relay-level mirror |
+| Coils | 0-16 relay levels |
+
+`read_identity()`, `read_firmware_version()` and `read_serial_number()` read the
+read-only input registers. The relay API is the working part of the driver:
 
 ```python
-from scietex.hal.current_amplifier.generic.modbus import (
-    GenericModbusCurrentAmplifier,
-    RegisterMapIncomplete,
+from scietex.hal.current_amplifier.scietex.ebic.modbus.v1 import (
+    EBICModbusV1Preamp,
 )
 from scietex.hal.serial import ModbusSerialConnectionConfig
 
 serial_config = ModbusSerialConnectionConfig(port="/dev/ttyUSB0", framer="RTU")
-amp = GenericModbusCurrentAmplifier(serial_config, address=1)
+amp = EBICModbusV1Preamp(serial_config)  # address 2, 19200 baud by default
 
+await amp.connect()
 try:
-    await amp.read_data()
-except RegisterMapIncomplete as error:
-    print(error)
+    levels = await amp.read_relays()   # FC01, coils 0-16
+    await amp.set_relay(0, True)       # FC05, one coil
+    await amp.set_relays([False] * 17) # FC0F, all coils
+finally:
+    await amp.close()
 ```
 
-`read_data()` resolves its three mandatory registers before the first read, so an
-unmapped device fails without partial traffic. Transcribing the register map —
-and filling in the capability set that the map implies — is the change that makes
-the driver operate.
+- `read_relays()` reads FC01 coils 0-16. The same levels are mirrored in input
+  registers 36-52, but reaching that mirror needs a 53-register FC04 read, so
+  coils are the narrower path. `read_relay(index)` reads a single coil.
+- `set_relay(index, state)` writes FC05; `set_relays(states)` writes FC0F with
+  exactly seventeen levels. FC0F is not atomic: the firmware applies and
+  persists each level in turn, so a failure can leave a partial group. Re-read
+  after an error instead of assuming a state.
+- Every relay write is persisted to EEPROM. The interface is a state switch, not
+  a PWM output, and frequent switching consumes flash write cycles. The level
+  reaches the GPIO; the driver board may invert it at the relay contact.
+- `get_slave_address()` / `set_slave_address()` and `get_baud_index()` /
+  `set_baud_rate()` read and write holding registers 0 and 1. A write is
+  acknowledged at the OLD address and baud rate, persisted to EEPROM, and
+  followed by a firmware restart after about 500 ms. The device then answers
+  only at the new setting, so construct a new instance after the restart. Writing
+  the value already stored answers normally and causes no restart. `set_baud_rate`
+  accepts only 9600, 14400, 19200, 38400, 57600 or 115200 and writes the index,
+  never the rate.
 
-Because the driver has no entry point, `registry.discover_drivers()` returns an
-empty mapping and `registry.resolve_driver("...")` raises `ValueError`. Until the
-device is identified the driver is reachable by direct import only.
+The driver advertises no amplifier capability (`capabilities` is empty) and
+`read_data()` returns an `AmplifierState` whose fields are all `None` with an
+empty filter tuple. That is deliberate: the firmware reports no voltage,
+current, range, gain, bias, bandwidth or status, and `None` is not zero. Preamp
+ranges, boost, bias and filters become available only when the relay-to-function
+map is documented and a semantic layer is built on top of this one.
+
+The driver is advertised through the `scietex.hal.current_amplifier.drivers`
+entry-point group as `ebic_modbus_v1_preamp`, so
+`registry.discover_drivers()` returns it and `registry.resolve_driver()` loads
+it by name.
 
 ## Testing
 
@@ -207,8 +243,10 @@ device is identified the driver is reachable by direct import only.
 pytest tests -q
 ```
 
-The suite drives in-memory amplifiers and asserts that the Modbus skeleton keeps
-the port closed; it needs no hardware and never opens a serial port.
+The suite exercises the capability model and drives the EBIC driver through a
+stub transport that records requests and returns canned responses, so it checks
+request construction and response validation without opening a serial port or
+needing hardware.
 
 Other checks:
 

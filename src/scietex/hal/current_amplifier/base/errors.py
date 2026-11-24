@@ -1,8 +1,9 @@
-"""Errors raised by the generic Modbus current amplifier driver.
+"""Errors shared by current amplifier drivers.
 
-The device's register map is not transcribed yet, so the driver fails loudly
-instead of guessing. An operation that needs a register the map does not carry
-raises :class:`RegisterMapIncomplete` before any bus traffic starts.
+These failures are transport-independent: they describe a driver that cannot
+answer for a register or a response that cannot belong to its request, not a bus
+that failed. Transport failures themselves are raised by
+`scietex.hal.serial` and are allowed to propagate unchanged.
 
 Classes:
     RegisterMapIncomplete: A register needed by the operation is not mapped.
@@ -27,10 +28,7 @@ class RegisterMapIncomplete(RuntimeError):
         detail: str = "has no address and function code",
     ) -> None:
         self.register = register
-        super().__init__(
-            f"{register} {detail}; fill it in at "
-            "scietex/hal/current_amplifier/generic/modbus/registers.py"
-        )
+        super().__init__(f"{register} {detail}")
 
 
 class UnexpectedResponse(OSError):
