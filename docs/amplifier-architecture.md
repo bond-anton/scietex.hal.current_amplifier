@@ -314,10 +314,12 @@ field; the strict getter raises `UnexpectedResponse` rather than guessing.
 
 ### Chosen driver defaults (D1, D3)
 
-- **D1 — board assumptions.** `RelayMapAssumptions(out2_is_low_z=True,
-  booster_source_tracks_channel=True)`: OUT2 is the low-Z output, and relay 3 is
-  steered to follow the selected channel. Both are inference, not firmware fact,
-  so they are injectable and pending bench confirmation.
+- **D1 — booster source.** The firmware states OUT1 is the high-Z output and OUT2
+  the low-Z output (commit `b83e474`). The driver always routes the selected
+  channel's output to the booster: `relaymap.BOOSTER_COILS` maps low-Z to
+  relay-3 coil 1 (OUT2) and high-Z to coil 0 (OUT1), and `select_feedback_resistor`
+  writes it on every channel change. Relay 3 is independent in hardware; the
+  non-contract `set_booster_source(out2)` overrides the tracking.
 - **D3 — break-before-make.** Gain changes and in-bank `Rf` changes release the
   old stage before engaging the new one, so the driver never presents two gain
   stages or two same-bank `Rf` relays at once. Cross-bank `Rf` changes keep a
@@ -333,12 +335,13 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
 
 ## 11. Open items
 
-### Resolved in code (with assumption)
+### Resolved (firmware / policy)
 
-- [x] OUT1/OUT2 ↔ channel correspondence: assumed OUT2 is the low-Z output
-      (`out2_is_low_z=True`); pending bench confirmation (§8).
-- [x] Relay 3 tracking: assumed it follows the selected channel
-      (`booster_source_tracks_channel=True`); pending bench confirmation (§8).
+- [x] OUT1/OUT2 ↔ channel correspondence: firmware commit `b83e474` states OUT1
+      is the high-Z output and OUT2 the low-Z output (§8).
+- [x] Booster source tracking: relay 3 is independent in hardware, but the driver
+      always routes the selected channel's output to the booster via
+      `relaymap.BOOSTER_COILS`; `set_booster_source(out2)` overrides it (§8).
 - [x] Gain break-before-make: the driver sequences gain and in-bank `Rf` changes
       break-before-make, so it needs no guarantee from the relays (§4).
 
@@ -346,8 +349,6 @@ pre-amp ceiling is unknown as well as when the amplifier swing is unknown.
 
 - [ ] Pre-amp sign convention: inverting or non-inverting, confirmed on the bench
       (§6).
-- [ ] Bench confirmation of the `out2_is_low_z` and
-      `booster_source_tracks_channel` assumptions (§8).
 - [ ] What drives the DAC path (relay 13) and whether it is reachable over Modbus
       (§9).
 - [ ] Behaviour when two `Rf` relays in one channel are closed simultaneously:

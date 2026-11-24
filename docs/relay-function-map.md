@@ -5,13 +5,19 @@ EBIC CONTROL preamp board
 ## Source
 
 Transcribed from the firmware repository
-`git.buro-nts.ru/a.kudryavtsev/ebic_control`, commit `e127278`, files
-`RELAY_FUNCTION_MAP.md`, `README.md` and `ebic_control_relay_map.pdf` (the PDF is
-the same content rendered as two pages). The function table is unchanged since
-`c1bb7b0`; `e127278` ("fix relay map in globals.c") changed only the GPIO pin
-assignment of relays 9–17 in `Core/Src/globals.c` and `README.md`. This file is a
-transcription for driver use: the firmware repository is authoritative, and the
-PDF there is a rendered copy.
+`git.buro-nts.ru/a.kudryavtsev/ebic_control`, files `RELAY_FUNCTION_MAP.md` and
+`README.md`. The map content comes from two commits:
+
+- `e127278` ("fix relay map in globals.c") changed only the GPIO pin assignment
+  of relays 9–17 in `Core/Src/globals.c` and `README.md`; the coil indices did
+  not move, and the function table is unchanged since `c1bb7b0`.
+- `b83e474` ("fix relay map in RELAY_FUNCTION_MAP.md") corrected the relay-3 row
+  and prose, fixing the relay/firmware-output correspondence: OUT1 is the high-Z
+  output and OUT2 the low-Z output.
+
+The current HEAD is `94f5068`, which only removes the rendered PDF snapshot of the
+map from the repository. This file is a transcription for driver use: the
+firmware repository is authoritative.
 
 ## Coil polarity and power-on state
 
@@ -53,7 +59,7 @@ off, compensation off, manual source.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 0 | PA0 | 36 | §01 | input path select | High-Z | Low-Z | |
 | 2 | 1 | PA1 | 37 | §01 | connects the amplifier's inverting input to the feedback of the *deselected* channel | low-Z feedback | high-Z feedback | Works in anti-phase with relay 1: with low-Z selected it closes the high-Z (deselected) feedback, and vice versa. Functional relationship only; both relays default to GPIO = 1. |
-| 3 | 2 | PA2 | 38 | §01 | selects which amplifier output feeds the booster | OUT1 → booster | OUT2 → booster | Independently selects the booster's source. |
+| 3 | 2 | PA2 | 38 | §01 | selects which amplifier output feeds the booster | OUT1 (High-Z) → booster | OUT2 (Low-Z) → booster | Independently selects the booster's source. OUT1 is the high-Z output, OUT2 the low-Z output (commit `b83e474`). |
 | 4 | 3 | PA3 | 39 | §01 | bias enable | ON | OFF | |
 | 5 | 4 | PA4 | 40 | §02 | 10 GΩ resistor | ON | OFF | |
 | 6 | 5 | PA5 | 41 | §02 | 1 GΩ resistor | ON | OFF | |
@@ -120,8 +126,8 @@ closed → ×1. The coding is one-hot, not binary; ×1 is the absence of all thr
 
 ## Derived driver invariants
 
-These are derived from the table above. The last two are inference, marked as
-such, not fact from the source.
+These are derived from the table above. Items 4 and 5 combine a firmware
+statement with the driver policy built on it.
 
 1. Relays 1 and 2 always carry the **same coil value**. Both are 1 at power-on;
    selecting low-Z means relay 1 = 1 and relay 2 = 1 because relay 2 closes the
@@ -132,19 +138,35 @@ such, not fact from the source.
 3. The power-on defaults therefore give the low-Z channel selected, the high-Z
    feedback closed, and 1 kΩ as the active `Rf` → default transimpedance 1 kΩ,
    the least sensitive setting.
-4. With relay 3 at its default (OUT2 → booster), the power-on state is only
-   self-consistent if OUT2 is the low-Z output. The source does not state which
-   output is which. *Inference; resolved in code as the assumption
-   `RelayMapAssumptions(out2_is_low_z=True)`, pending bench confirmation.*
-5. Relay 3 must logically agree with relays 1/2, otherwise the booster amplifies
-   the unselected channel, but the source calls it independent and does not
-   define the required correspondence. *Inference; resolved in code as the
-   assumption `RelayMapAssumptions(booster_source_tracks_channel=True)`, pending
-   bench confirmation.*
+4. The firmware states OUT1 is the high-Z output and OUT2 the low-Z output
+   (commit `b83e474`). Relay 3 at its power-on default routes OUT2, the low-Z
+   output, to the booster, which matches the low-Z channel that relays 1/2 select
+   at power-on. The relay-3 coil value is 1 for the low-Z output (OUT2) and 0 for
+   the high-Z output (OUT1).
+5. The driver always tracks the selected channel: `select_feedback_resistor`
+   writes relay 3 from `relaymap.BOOSTER_COILS` (`{LOW_Z: True, HIGH_Z: False}`),
+   so the booster amplifies the selected channel's output. Relay 3 is still
+   independent in hardware; the non-contract `set_booster_source(out2)` overrides
+   the tracking.
 
 ## Open items for the driver
 
-### Resolved in code (with assumption)
+### Resolved by firmware documentation
+
+- [x] **OUT1/OUT2 ↔ channel correspondence.** Commit `b83e474` states OUT1 is the
+      high-Z output and OUT2 the low-Z output, so the correspondence is firmware
+      fact. The power-on relay-3 default (OUT2 → booster) now matches the power-on
+      low-Z channel by construction.
+
+### Settled driver policy
+
+- [x] **Booster source tracking.** Relay 3 is independent in hardware, but the
+      driver always routes the selected channel's output to the booster:
+      `relaymap.BOOSTER_COILS = {LOW_Z: True, HIGH_Z: False}` supplies the
+      relay-3 coil write on every channel select. The non-contract
+      `set_booster_source(out2: bool)` overrides it.
+
+### Resolved in code
 
 - [x] **Relay 13 source select.** Taken as option A: exposed as the non-contract
       extension methods `get_bias_compensation_source` /
@@ -152,12 +174,6 @@ such, not fact from the source.
       of `CurrentAmplifierCapabilities`. The layer never writes relay 13
       implicitly, so it stays at the firmware's Manual source until a caller
       selects otherwise.
-- [x] **OUT1/OUT2 ↔ channel correspondence.** Assumed `OUT2` is the low-Z output:
-      `RelayMapAssumptions(out2_is_low_z=True)`. Pending bench confirmation.
-- [x] **Whether relay 3 tracks the channel.** Assumed it must:
-      `RelayMapAssumptions(booster_source_tracks_channel=True)`, so a channel
-      change steers relay 3 to the matching booster input. Pending bench
-      confirmation.
 - [x] **Two `Rf` relays closed in one channel.** The driver enforces exactly one
       `Rf` per bank on every write; a readback that names zero or several
       resistors of the active channel decodes to `None`, and the strict getter
@@ -170,7 +186,6 @@ such, not fact from the source.
 
 - [ ] What drives the DAC path (relay 13) and whether it is reachable over
       Modbus.
-- [ ] Bench confirmation of `out2_is_low_z` and `booster_source_tracks_channel`.
 - [ ] Physical behaviour when two `Rf` relays are closed at once: the code
       forbids it, but whether parallel summing is intended is still unknown.
 - [ ] Whether the Overcurrent comparator is brought out to a connector.
@@ -197,9 +212,11 @@ it fixes:
   non-contract `get_bias_compensation_source` / `set_bias_compensation_source`
   extension and is never written implicitly. Relay 3 is likewise a non-contract
   `get_booster_source` / `set_booster_source` extension.
-- **Chosen code defaults:** `RelayMapAssumptions(out2_is_low_z=True,
-  booster_source_tracks_channel=True)`, break-before-make ordering for gain and
-  in-bank `Rf` changes, and exactly one `Rf` per bank on every write.
+- **Chosen code defaults:** the booster always tracks the selected channel
+  (`relaymap.BOOSTER_COILS`; low-Z → relay-3 coil 1, high-Z → coil 0), with
+  `set_booster_source(out2)` as the manual override; break-before-make ordering
+  for gain and in-bank `Rf` changes; and exactly one `Rf` per bank on every
+  write.
 - The full-scale current `min(5, 10/G) / Rf` is derived in
   [amplifier-architecture.md §7](amplifier-architecture.md#7-limits-and-full-scale-current);
   it is not restated here.

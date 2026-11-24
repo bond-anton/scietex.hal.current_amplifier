@@ -22,6 +22,7 @@ Constants:
     RF_CHANNEL: ``Rf`` relay to the channel it belongs to.
     GAIN_RELAY: Booster gain to the relay that selects it.
     CHANNEL_COILS: Channel to the coil value that selects it.
+    BOOSTER_COILS: Channel to the relay-3 coil that feeds it to the booster.
     POWER_ON_COILS: The coil snapshot of the power-on and blank-EEPROM state.
 
 Functions:
@@ -130,6 +131,19 @@ CHANNEL_COILS: dict[RfChannel, bool] = {
     RfChannel.HIGH_Z: False,
 }
 """Map a channel to the coil value relays 1 and 2 carry when it is selected."""
+
+BOOSTER_COILS: dict[RfChannel, bool] = {
+    RfChannel.LOW_Z: True,
+    RfChannel.HIGH_Z: False,
+}
+"""Map a channel to the relay-3 coil that routes its stage-1 output to the booster.
+
+Firmware commit ``b83e474`` fixes which booster input each level closes: coil
+``True`` selects ``OUT2``, the low-Z output, and coil ``False`` selects
+``OUT1``, the high-Z output. The level therefore matches ``CHANNEL_COILS`` for
+every channel, so the power-on state already feeds the selected low-Z channel
+to the booster.
+"""
 
 POWER_ON_COILS: tuple[bool, ...] = (True,) * 17
 """Coil values of the power-on and blank-EEPROM state; relay 12 alone engages."""

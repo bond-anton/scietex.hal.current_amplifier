@@ -119,7 +119,9 @@ contract members, so they are exposed as extension methods:
 `get_bias_compensation_source` / `set_bias_compensation_source` and
 `get_booster_source` / `set_booster_source`. The layer never writes relay 13
 implicitly; it leaves the firmware's Manual source in place unless the caller
-asks otherwise.
+asks otherwise. Relay 3 is driven automatically to follow the selected channel
+(low-Z and high-Z route to their own booster input); `set_booster_source`
+overrides that tracking.
 
 Where an operation is advertised, the capability set answers whether it is
 writable; where a value is available, the snapshot carries it. The two are
@@ -308,7 +310,9 @@ Still unsupported on this board, and therefore absent from both drivers:
 bandwidth, filters, output inversion, bias level, compensation level and every
 measurement. Relay 13 (bias/compensation source) and relay 3 (booster source) are
 not contract members; the semantic layer exposes them only as the extension
-methods described in [Usage](#usage), and never writes relay 13 implicitly.
+methods described in [Usage](#usage), and never writes relay 13 implicitly. Relay
+3 is written on every channel select so the booster follows the selected channel;
+`set_booster_source` overrides it.
 
 Both drivers are advertised through the
 `scietex.hal.current_amplifier.drivers` entry-point group: `ebic_modbus_v1_preamp`

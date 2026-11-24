@@ -13,26 +13,26 @@ Exports:
     DeviceIdentity: The vendor, product, version and serial number.
     BaudRate: Baud rates the firmware selects by index.
     RelayAccess: The relay operations the semantic layer needs.
-    RelayMapAssumptions: The board facts the relay map records as inference.
     RelayTransitionError: A relay transition did not reach its target.
+    BOOSTER_COILS: Channel to the relay-3 coil that feeds it to the booster.
 """
 
 from .client import EBICModbusV1Preamp
 from .constants import BaudRate
 from .identity import DeviceIdentity
+from .relaymap import BOOSTER_COILS
 from .semantic import (
     EBICModbusV1Amplifier,
     RelayAccess,
-    RelayMapAssumptions,
     RelayTransitionError,
 )
 
 __all__ = [
+    "BOOSTER_COILS",
     "BaudRate",
     "DeviceIdentity",
     "EBICModbusV1Amplifier",
     "EBICModbusV1Preamp",
     "RelayAccess",
-    "RelayMapAssumptions",
     "RelayTransitionError",
 ]

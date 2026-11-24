@@ -6,6 +6,7 @@ every test here fails if they drift.
 
 try:
     from src.scietex.hal.current_amplifier.scietex.ebic.modbus.v1.relaymap import (
+        BOOSTER_COILS,
         CHANNEL_COILS,
         GAIN_RELAY,
         POWER_ON_COILS,
@@ -23,6 +24,7 @@ try:
     )
 except ModuleNotFoundError:
     from scietex.hal.current_amplifier.scietex.ebic.modbus.v1.relaymap import (
+        BOOSTER_COILS,
         CHANNEL_COILS,
         GAIN_RELAY,
         POWER_ON_COILS,
@@ -100,6 +102,18 @@ def test_rf_table_covers_the_eight_resistors_and_their_banks():
 def test_channel_coils_select_low_z_with_a_high_coil():
     """Relays 1 and 2 carry ``True`` for low-Z and ``False`` for high-Z."""
     assert CHANNEL_COILS == {RfChannel.LOW_Z: True, RfChannel.HIGH_Z: False}
+
+
+def test_booster_coils_route_each_channel_to_its_booster_input():
+    """Relay 3 repeats the channel coil: ``True`` closes OUT2, the low-Z output."""
+    assert BOOSTER_COILS == {RfChannel.LOW_Z: True, RfChannel.HIGH_Z: False}
+    assert BOOSTER_COILS[RfChannel.LOW_Z] is True
+    assert BOOSTER_COILS[RfChannel.HIGH_Z] is False
+    assert BOOSTER_COILS[RfChannel.LOW_Z] is CHANNEL_COILS[RfChannel.LOW_Z]
+
+    power_on = decode_coils(POWER_ON_COILS)
+    assert power_on.channel is RfChannel.LOW_Z
+    assert power_on.booster_source_coil is BOOSTER_COILS[RfChannel.LOW_Z]
 
 
 def test_gain_relays_are_one_hot_over_the_three_stages():

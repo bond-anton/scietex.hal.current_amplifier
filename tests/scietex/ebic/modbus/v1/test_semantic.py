@@ -21,10 +21,10 @@ try:
     )
     from src.scietex.hal.current_amplifier.scietex.ebic.modbus.v1 import (
         EBICModbusV1Amplifier,
-        RelayMapAssumptions,
         RelayTransitionError,
     )
     from src.scietex.hal.current_amplifier.scietex.ebic.modbus.v1.relaymap import (
+        BOOSTER_COILS,
         CHANNEL_COILS,
         POWER_ON_COILS,
         RF_CHANNEL,
@@ -48,10 +48,10 @@ except ModuleNotFoundError:
     )
     from scietex.hal.current_amplifier.scietex.ebic.modbus.v1 import (
         EBICModbusV1Amplifier,
-        RelayMapAssumptions,
         RelayTransitionError,
     )
     from scietex.hal.current_amplifier.scietex.ebic.modbus.v1.relaymap import (
+        BOOSTER_COILS,
         CHANNEL_COILS,
         POWER_ON_COILS,
         RF_CHANNEL,
@@ -116,9 +116,9 @@ class FakeRelayAccess:
             self.coils[index] = state
 
 
-def _driver(fake, *, assumptions=None) -> EBICModbusV1Amplifier:
+def _driver(fake) -> EBICModbusV1Amplifier:
     """Build a semantic driver over ``fake``, with no serial configuration."""
-    return EBICModbusV1Amplifier(relay_driver=fake, assumptions=assumptions)
+    return EBICModbusV1Amplifier(relay_driver=fake)
 
 
 def _coils(*engaged: Relay) -> list[bool]:
@@ -262,17 +262,35 @@ async def test_every_feedback_selection_ends_with_one_resistor_of_its_channel():
 
 
 @pytest.mark.asyncio
-async def test_booster_source_can_be_told_not_to_track_the_channel():
-    """With the inference off, a cross-bank switch leaves coil 2 alone."""
-    fake = FakeRelayAccess()
-    driver = _driver(
-        fake,
-        assumptions=RelayMapAssumptions(booster_source_tracks_channel=False),
-    )
+@pytest.mark.parametrize(
+    ("initial", "resistance", "target_channel"),
+    [
+        (POWER_ON_COILS, 10_000_000, RfChannel.HIGH_Z),
+        (
+            _coils(
+                Relay.CHANNEL_SELECT,
+                Relay.DESELECTED_FEEDBACK,
+                Relay.RF_HIGH_10M,
+                Relay.BOOST_SOURCE,
+            ),
+            1_000,
+            RfChannel.LOW_Z,
+        ),
+    ],
+)
+async def test_selecting_a_channel_also_routes_it_to_the_booster(
+    initial, resistance, target_channel
+):
+    """Relay 3 takes the ``BOOSTER_COILS`` level after the channel relays."""
+    fake = FakeRelayAccess(initial)
+    driver = _driver(fake)
 
-    await driver.select_feedback_resistor(10_000_000)
+    await driver.select_feedback_resistor(resistance)
 
-    assert 2 not in [index for index, _ in fake.writes]
+    booster = (coil_index(Relay.BOOST_SOURCE), BOOSTER_COILS[target_channel])
+    assert fake.writes.index(booster) == 3
+    assert fake.coils[coil_index(Relay.BOOST_SOURCE)] is BOOSTER_COILS[target_channel]
+    assert decode_coils(fake.coils).booster_source_coil is BOOSTER_COILS[target_channel]
 
 
 # -- booster gain -----------------------------------------------------------

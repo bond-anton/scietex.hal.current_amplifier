@@ -7,11 +7,13 @@ compensation and a state snapshot. Every write is validated before any bus
 traffic, and every multi-relay change is sequenced so that a transition never
 leaves two resistors of one feedback bank engaged at the same time.
 
-The relay map records two board facts as inference rather than as firmware
-guarantees: which booster output serves the low-Z channel, and whether the
-booster source must follow the channel selection. Both are inputs to
-:class:`RelayMapAssumptions` so a caller can state a different belief without
-editing a table the firmware transcribes.
+The relay map records the firmware's relay-3 correspondence: ``OUT2`` is the
+low-Z output and ``OUT1`` the high-Z output. The firmware calls relay 3
+independent, so steering it is a driver policy rather than a hardware
+constraint: every channel selection also routes the selected channel's stage-1
+output to the booster, so the amplifier never boosts the unselected channel.
+:meth:`EBICModbusV1Amplifier.set_booster_source` overrides that choice
+explicitly.
 
 The layer is a :class:`CurrentAmplifierProtocol` implementation. Its
 capabilities declare the selectable controls the map now fixes; the raw driver
@@ -20,7 +22,6 @@ functions.
 
 Classes:
     RelayAccess: The relay operations the semantic layer needs from a transport.
-    RelayMapAssumptions: Board facts the relay map records as inference.
     RelayTransitionError: A relay could not be driven to the requested state.
     EBICModbusV1Amplifier: The EBIC v1.0 amplifier driver.
 """
@@ -28,7 +29,6 @@ Classes:
 import asyncio
 import math
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
 from logging import Logger
 from typing import ClassVar, Protocol
 
@@ -54,6 +54,7 @@ from .....base import (
 from .client import EBICModbusV1Preamp
 from .constants import DEFAULT_SLAVE_ADDRESS
 from .relaymap import (
+    BOOSTER_COILS,
     CHANNEL_COILS,
     GAIN_RELAY,
     RF_CHANNEL,
@@ -62,7 +63,6 @@ from .relaymap import (
     BiasCompensationSource,
     Relay,
     RelayReadback,
-    RfChannel,
     coil_index,
     coil_level,
     decode_coils,
@@ -96,23 +96,6 @@ class RelayAccess(Protocol):
     async def set_relay(self, index: int, state: bool) -> None:
         """Drive one relay to a raw coil level."""
         ...
-
-
-@dataclass(frozen=True, slots=True)
-class RelayMapAssumptions:
-    """Board facts the relay map records as inference, not as firmware fact.
-
-    Attributes:
-        out2_is_low_z: Whether ``OUT2`` is the low-Z channel's output. The
-            power-on state is self-consistent only under this assumption, and
-            the source does not state which output is which.
-        booster_source_tracks_channel: Whether every channel selection also
-            steers relay 3 to the matching booster input. The source calls the
-            relay independent and does not define the required correspondence.
-    """
-
-    out2_is_low_z: bool = True
-    booster_source_tracks_channel: bool = True
 
 
 class RelayTransitionError(RuntimeError):
@@ -202,13 +185,12 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
     )
 
     relays: RelayAccess
-    _assumptions: RelayMapAssumptions
     _write_lock: asyncio.Lock
 
     # The signature mirrors the raw driver's four parameters and adds the
-    # injected transport and the map assumptions keyword-only; both are needed
-    # for a driver that can run without a serial port.
-    def __init__(  # noqa: PLR0913
+    # injected transport keyword-only, which is needed for a driver that can
+    # run without a serial port.
+    def __init__(
         self,
         con_params: SerialConnectionConfig | ModbusSerialConnectionConfig | None = None,
         address: int = DEFAULT_SLAVE_ADDRESS,
@@ -216,7 +198,6 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         logger: Logger | None = None,
         *,
         relay_driver: RelayAccess | None = None,
-        assumptions: RelayMapAssumptions | None = None,
     ) -> None:
         """
         Initialize the amplifier.
@@ -229,8 +210,6 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             logger: Optional logger for raw transport diagnostics.
             relay_driver: A relay transport to drive instead of opening a serial
                 port. An in-memory fake uses this path.
-            assumptions: The inferred board facts. The relay map defaults are
-                used when ``None``.
 
         Raises:
             TypeError: If neither ``con_params`` nor ``relay_driver`` is given,
@@ -250,9 +229,6 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
                 logger=logger,
             )
         self.relays = relay_driver
-        self._assumptions = (
-            assumptions if assumptions is not None else RelayMapAssumptions()
-        )
         self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
@@ -555,20 +531,13 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             steps.append((target_relay, coil_level(target_relay, True)))
         steps.append((Relay.CHANNEL_SELECT, CHANNEL_COILS[target_channel]))
         steps.append((Relay.DESELECTED_FEEDBACK, CHANNEL_COILS[target_channel]))
-        if self._assumptions.booster_source_tracks_channel:
-            steps.append((Relay.BOOST_SOURCE, self._booster_level(target_channel)))
+        steps.append((Relay.BOOST_SOURCE, BOOSTER_COILS[target_channel]))
         for relay in engaged_rf:
             if relay is not target_relay:
                 steps.append((relay, coil_level(relay, False)))
         if not cross_bank:
             steps.append((target_relay, coil_level(target_relay, True)))
         return steps
-
-    def _booster_level(self, channel: RfChannel) -> bool:
-        """Return the raw coil level of relay 3 for the channel's booster input."""
-        if channel is RfChannel.LOW_Z:
-            return self._assumptions.out2_is_low_z
-        return not self._assumptions.out2_is_low_z
 
     async def _transition(
         self,
