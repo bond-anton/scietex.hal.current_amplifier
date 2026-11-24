@@ -14,6 +14,7 @@ try:
     from src.scietex.hal.current_amplifier.base import (
         Access,
         AmplifierState,
+        BandwidthCapabilities,
         BoostCapabilities,
         CompensationCapabilities,
         CurrentAmplifierCapabilities,
@@ -31,6 +32,7 @@ except ModuleNotFoundError:
     from scietex.hal.current_amplifier.base import (
         Access,
         AmplifierState,
+        BandwidthCapabilities,
         BoostCapabilities,
         CompensationCapabilities,
         CurrentAmplifierCapabilities,
@@ -90,17 +92,6 @@ class FakeAmplifier(CurrentAmplifierProtocol):
             read=filters.enabled.read or filters.cutoff.read,
             write=filters.enabled.write or filters.cutoff.write,
         )
-
-    async def get_preamp_range(self) -> float:
-        self._require_read(self.capabilities.preamp.range.access, "get_preamp_range")
-        return self._state.preamp_range
-
-    async def select_preamp_range(self, range_value: float) -> None:
-        self._require_write(
-            self.capabilities.preamp.range.access,
-            "select_preamp_range",
-        )
-        self._state = replace(self._state, preamp_range=range_value)
 
     async def get_boost_gain(self) -> float:
         self._require_read(self.capabilities.boost.gain.access, "get_boost_gain")
@@ -209,10 +200,7 @@ def full_amplifier() -> FakeAmplifier:
     read_write = Access(read=True, write=True)
     capabilities = CurrentAmplifierCapabilities(
         preamp=PreampCapabilities(
-            range=SelectableCapabilities(
-                access=read_write,
-                options=(1.0, 2.0, 3.0),
-            ),
+            max_output_v=5.0,
             feedback_resistor=SelectableCapabilities(
                 access=read_write,
                 options=(1e4, 1e5, 1e6),
@@ -227,7 +215,7 @@ def full_amplifier() -> FakeAmplifier:
         ),
         output_voltage=OutputVoltageCapabilities(min_v=-10.0, max_v=10.0),
         dc_bias=DcBiasCapabilities(enabled=read_write, level=read_write),
-        bandwidth=SelectableCapabilities(
+        bandwidth=BandwidthCapabilities(
             access=read_write,
             options=(1e3, 1e4, 1e6),
         ),
@@ -236,8 +224,8 @@ def full_amplifier() -> FakeAmplifier:
             enabled=read_write,
             cutoff=read_write,
         ),
-        input_overcurrent=IndicationCapabilities(read=True),
-        output_overload=IndicationCapabilities(read=True),
+        input_overcurrent=IndicationCapabilities(present=True, read=True),
+        output_overload=IndicationCapabilities(present=True, read=True),
         input_compensation=CompensationCapabilities(
             enabled=read_write,
             level=read_write,
@@ -248,7 +236,6 @@ def full_amplifier() -> FakeAmplifier:
         output_voltage_v=1.25,
         output_current_a=2.5e-3,
         input_current_a=1.0e-6,
-        preamp_range=2.0,
         boost_gain=10.0,
         feedback_resistor_ohm=1e4,
         dc_bias_enabled=True,
@@ -269,7 +256,7 @@ def full_amplifier() -> FakeAmplifier:
 def read_only_bandwidth_amplifier() -> FakeAmplifier:
     """An amplifier whose only feature is a readable bandwidth."""
     capabilities = CurrentAmplifierCapabilities(
-        bandwidth=SelectableCapabilities(
+        bandwidth=BandwidthCapabilities(
             access=Access(read=True),
             options=(1e3, 1e4),
         )

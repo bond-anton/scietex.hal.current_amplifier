@@ -8,21 +8,26 @@ import pytest
 try:
     from src.scietex.hal.current_amplifier.base import (
         AmplifierState,
+        BandwidthCapabilities,
         CurrentAmplifierCapabilities,
         CurrentAmplifierProtocol,
         FilterSetting,
         FilterType,
+        IndicationCapabilities,
     )
 except ModuleNotFoundError:
     from scietex.hal.current_amplifier.base import (
         AmplifierState,
+        BandwidthCapabilities,
         CurrentAmplifierCapabilities,
         CurrentAmplifierProtocol,
         FilterSetting,
         FilterType,
+        IndicationCapabilities,
     )
 
 from fakes import (  # noqa: E402
+    FakeAmplifier,
     full_amplifier,
     minimal_amplifier,
     read_only_bandwidth_amplifier,
@@ -122,8 +127,6 @@ def test_core_methods_alone_do_not_satisfy_protocol():
 
 
 _OPTIONAL_CALLS = [
-    ("get_preamp_range", ()),
-    ("select_preamp_range", (1.0,)),
     ("get_boost_gain", ()),
     ("set_boost_gain", (10.0,)),
     ("get_feedback_resistor", ()),
@@ -168,10 +171,10 @@ _CAN_PROPERTIES = [
 
 
 def test_optional_call_table_covers_every_optional_method():
-    """The table matches the protocol exactly: 20 optional coroutines."""
+    """The table matches the protocol exactly: 18 optional coroutines."""
     table_names = [name for name, _ in _OPTIONAL_CALLS]
 
-    assert len(table_names) == len(set(table_names)) == 20
+    assert len(table_names) == len(set(table_names)) == 18
     assert set(table_names) == _protocol_methods()
     assert all(
         inspect.iscoroutinefunction(getattr(MinimalAmplifier, name))
@@ -199,7 +202,7 @@ async def test_optional_method_default_raises_not_implemented(method_name, args)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method_name", sorted(_protocol_methods()))
 async def test_not_implemented_messages_never_call_the_preamp_a_gain_stage(method_name):
-    """Only the boost stage is a gain; the preamp names its range or resistor."""
+    """Only the boost stage is a gain; the preamp names its feedback resistor."""
     amplifier = MinimalAmplifier()
     args = dict(_OPTIONAL_CALLS).get(method_name, ())
 
@@ -215,8 +218,6 @@ async def test_not_implemented_messages_never_call_the_preamp_a_gain_stage(metho
 @pytest.mark.parametrize(
     ("method_name", "capability"),
     [
-        ("get_preamp_range", "preamp.range"),
-        ("select_preamp_range", "preamp.range"),
         ("get_boost_gain", "boost.gain"),
         ("set_boost_gain", "boost.gain"),
         ("get_feedback_resistor", "preamp.feedback_resistor"),
@@ -273,8 +274,8 @@ async def test_read_only_bandwidth_is_readable_but_not_settable():
 @pytest.mark.asyncio
 async def test_fake_absent_feature_raises_not_implemented():
     """The fake mirrors a driver by rejecting a feature it does not advertise."""
-    with pytest.raises(NotImplementedError, match="get_preamp_range"):
-        await minimal_amplifier().get_preamp_range()
+    with pytest.raises(NotImplementedError, match="get_feedback_resistor"):
+        await minimal_amplifier().get_feedback_resistor()
 
 
 @pytest.mark.asyncio
@@ -328,18 +329,44 @@ async def test_full_amplifier_boost_stage_is_enumerated_and_settable():
 
 
 @pytest.mark.asyncio
-async def test_full_amplifier_preamp_range_is_settable():
-    """The preamp range round-trips through the fake."""
+async def test_full_amplifier_feedback_resistor_is_settable():
+    """The feedback resistor round-trips through the fake."""
     amplifier = full_amplifier()
 
-    await amplifier.select_preamp_range(3.0)
-    assert await amplifier.get_preamp_range() == 3.0
+    await amplifier.select_feedback_resistor(1e5)
+    assert await amplifier.get_feedback_resistor() == 1e5
 
 
 @pytest.mark.asyncio
-async def test_fake_preamp_range_requires_write_access():
-    """A readable preamp range refuses writes it does not advertise."""
+async def test_fake_feedback_resistor_requires_write_access():
+    """A preamp without write access refuses a resistor change."""
     amplifier = read_only_bandwidth_amplifier()
 
-    with pytest.raises(NotImplementedError, match="select_preamp_range"):
-        await amplifier.select_preamp_range(1.0)
+    with pytest.raises(NotImplementedError, match="select_feedback_resistor"):
+        await amplifier.select_feedback_resistor(1e4)
+
+
+@pytest.mark.asyncio
+async def test_fixed_bandwidth_is_known_but_not_selectable():
+    """A bandwidth fixed by the design is readable from the capability set."""
+    capabilities = CurrentAmplifierCapabilities(
+        bandwidth=BandwidthCapabilities(fixed_hz=1e4)
+    )
+    amplifier = FakeAmplifier(capabilities, AmplifierState(bandwidth_hz=1e4))
+
+    assert amplifier.supports_bandwidth is False
+    assert amplifier.can_set_bandwidth is False
+    assert amplifier.capabilities.bandwidth.fixed_hz == 1e4
+    with pytest.raises(NotImplementedError, match="get_bandwidth"):
+        await amplifier.get_bandwidth()
+
+
+def test_present_but_unobservable_indication_is_not_supported():
+    """A signal that exists but cannot be read is present yet unsupported."""
+    capabilities = CurrentAmplifierCapabilities(
+        input_overcurrent=IndicationCapabilities(present=True)
+    )
+    amplifier = FakeAmplifier(capabilities, AmplifierState())
+
+    assert amplifier.supports_input_overcurrent is False
+    assert amplifier.capabilities.input_overcurrent.present is True

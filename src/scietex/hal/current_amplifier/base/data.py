@@ -50,8 +50,6 @@ class AmplifierState(msgspec.Struct, frozen=True, kw_only=True):
         output_current_a: Output current in A, or ``None`` when unreadable.
         input_current_a: Input (source) current in A, or ``None`` when
             unreadable.
-        preamp_range: Device-native preamp range designator, or ``None`` when
-            unreadable.
         boost_gain: Dimensionless boost stage setting, or ``None`` when the
             driver does not report it. ``None`` is not ``1.0``: an unreported
             gain may be anything, while unity is the value the device applies
@@ -77,7 +75,6 @@ class AmplifierState(msgspec.Struct, frozen=True, kw_only=True):
     output_voltage_v: float | None = None
     output_current_a: float | None = None
     input_current_a: float | None = None
-    preamp_range: float | None = None
     boost_gain: float | None = None
     feedback_resistor_ohm: float | None = None
     dc_bias_enabled: bool | None = None

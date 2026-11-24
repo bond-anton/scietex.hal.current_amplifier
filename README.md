@@ -11,8 +11,10 @@ driver implements. The first hardware driver talks to the EBIC v1.0 preamp over
 Modbus RTU; it covers the device's relay outputs and communication settings,
 which is what that firmware implements. Mapping those relays to preamp ranges,
 boost, bias or filters needs the board's relay table and is not part of this
-driver yet, so the driver advertises no amplifier capability and its state
-snapshot is empty.
+driver yet, so the driver declares only the static analog geometry it can know
+without that map — the pre-amp +/-5 V clip point, the booster +/-10 V linear
+range, and the presence of the Overcurrent comparator — and it selects and
+reports nothing; its state snapshot is empty.
 
 ## Status
 
@@ -106,9 +108,10 @@ if state.feedback_resistor_ohm is not None:
 ```
 
 `total_transconductance` returns `Rf * boost` in V/A and raises `ValueError` for a
-zero or negative resistor. `max_input_current_a` divides the symmetric swing by
-that transconductance: it returns `None` when either output limit is unknown and
-`inf` when the transconductance is zero.
+zero or negative resistor. `max_input_current_a` divides
+`min(preamp.max_output_v, amplifier_swing / boost_gain)` by the feedback resistor,
+so it accounts for both the pre-amp ceiling and the booster swing. It returns
+`None` when either the pre-amp ceiling or the output limits are unknown.
 
 ## Capabilities
 
@@ -118,20 +121,21 @@ whole set as a class attribute, so it is known before the instance connects.
 
 | Group | Capability fields | Snapshot fields | Support query | Write query |
 | --- | --- | --- | --- | --- |
-| Preamp | `preamp.range`, `preamp.feedback_resistor` | `preamp_range`, `feedback_resistor_ohm` | `supports_preamp` | `can_select_preamp` |
+| Preamp | `preamp.feedback_resistor`, `preamp.max_output_v` | `feedback_resistor_ohm` | `supports_preamp` | `can_select_preamp` |
 | Boost | `boost.gain`, `boost.default_gain` | `boost_gain` | `supports_boost` | `can_set_boost` |
 | DC bias | `dc_bias.enabled`, `dc_bias.level` | `dc_bias_enabled`, `dc_bias_level` | `supports_dc_bias` | `can_set_dc_bias` |
-| Bandwidth | `bandwidth` | `bandwidth_hz` | `supports_bandwidth` | `can_set_bandwidth` |
+| Bandwidth | `bandwidth.access`, `bandwidth.options`, `bandwidth.fixed_hz` | `bandwidth_hz` | `supports_bandwidth` | `can_set_bandwidth` |
 | Filters | `filters.types`, `filters.enabled`, `filters.cutoff` | `filters` | `supports_filters` | `can_set_filter` |
-| Input overcurrent | `input_overcurrent.read` | `input_overcurrent` | `supports_input_overcurrent` | not writable |
-| Output overload | `output_overload.read` | `output_overload` | `supports_output_overload` | not writable |
+| Input overcurrent | `input_overcurrent.present`, `input_overcurrent.read` | `input_overcurrent` | `supports_input_overcurrent` | not writable |
+| Output overload | `output_overload.present`, `output_overload.read` | `output_overload` | `supports_output_overload` | not writable |
 | Input compensation | `input_compensation.enabled`, `input_compensation.level` | `input_compensation_enabled`, `input_compensation_level` | `supports_input_compensation` | `can_set_input_compensation` |
 | Output inversion | `invert_output` | `inverted` | `supports_invert_output` | `can_set_invert_output` |
 
-The output voltage swing is static geometry rather than a controllable feature, so
-it has no `supports_*` property: `capabilities.output_voltage` is read directly
-and holds the `min_v` and `max_v` limits, while the voltage the device currently
-reports is `state.output_voltage_v`.
+The output voltage swing and the pre-amp clip point are static geometry rather
+than controllable features, so they have no `supports_*` properties:
+`capabilities.output_voltage` is read directly and holds the `min_v` and `max_v`
+limits, and `capabilities.preamp.max_output_v` holds the pre-amp clip point. The
+voltage the device currently reports is `state.output_voltage_v`.
 
 The two status indications are read only through `read_data()`; there are no
 dedicated accessors. `output_voltage_v`, `output_current_a` and `input_current_a`
@@ -145,9 +149,16 @@ Some rules the model enforces:
   it does not mean no value is accepted.
 - `Access(read=..., write=...)` separates reading from writing, and
   `bool(access)` is true when either direction is supported.
-- `preamp.range` is a designator the device chooses; `preamp.feedback_resistor`
-  is a physical resistance in ohm. The two are independent and must not be
-  converted into one another.
+- The input-current range is derived, not selected: given the feedback resistor,
+  the boost gain and the static clip limits, `max_input_current_a` returns
+  `min(preamp.max_output_v, 10 V / G) / Rf`. `preamp.feedback_resistor` is the
+  physical resistance in ohm that anchors the calculation.
+- `BandwidthCapabilities` covers four states: selectable-enumerated, selectable-
+  continuous, fixed-known and fixed-unknown. `fixed_hz` is `None` when the
+  bandwidth is selectable or when a fixed value is unknown.
+- `IndicationCapabilities` separates presence from observability: `read=True`
+  requires `present=True`, and a present-but-unobservable signal is truthy for
+  `bool()` but falsy for the matching `supports_*` property.
 - `FilterType` covers `LOW_PASS`, `HIGH_PASS` and `BAND_PASS`; a filter entry is a
   `FilterSetting` with `enabled` and the cutoff corners in Hz that apply.
 - `boost.default_gain` is the gain applied at power-on, which is unity for this
@@ -175,6 +186,8 @@ STM32F411) over Modbus RTU. The register map is transcribed from the firmware;
 the device exposes seventeen relay outputs and the two settings that reach them,
 and nothing else. There is no ADC, DAC, measurement, status or unlock register,
 so the driver does not invent one.
+
+The analog architecture behind the relay bank is described in [docs/amplifier-architecture.md](docs/amplifier-architecture.md).
 
 | Item | Value |
 | --- | --- |
@@ -225,10 +238,12 @@ finally:
   accepts only 9600, 14400, 19200, 38400, 57600 or 115200 and writes the index,
   never the rate.
 
-The driver advertises no amplifier capability (`capabilities` is empty) and
-`read_data()` returns an `AmplifierState` whose fields are all `None` with an
-empty filter tuple. That is deliberate: the firmware reports no voltage,
-current, range, gain, bias, bandwidth or status, and `None` is not zero. Preamp
+The driver declares only the static analog geometry: `preamp.max_output_v = 5.0`,
+`output_voltage` over +/-10 V, and `input_overcurrent =
+IndicationCapabilities(present=True, read=False)`. Every `supports_*`/`can_*`
+property stays `False`, and `read_data()` returns an `AmplifierState` whose fields
+are all `None` with an empty filter tuple: the firmware has no measurement or
+status register and the `Rf` values are unknown, so `None` is not zero. Preamp
 ranges, boost, bias and filters become available only when the relay-to-function
 map is documented and a semantic layer is built on top of this one.
 

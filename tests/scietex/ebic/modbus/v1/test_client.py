@@ -36,9 +36,13 @@ from scietex.hal.serial import ModbusSerialConnectionConfig
 try:
     from src.scietex.hal.current_amplifier.base import (
         AmplifierState,
+        BandwidthCapabilities,
         CurrentAmplifierCapabilities,
         CurrentAmplifierProtocol,
+        IndicationCapabilities,
+        OutputVoltageCapabilities,
         RegisterMapIncomplete,
+        SelectableCapabilities,
         UnexpectedResponse,
     )
     from src.scietex.hal.current_amplifier.scietex.ebic.modbus.v1 import (
@@ -58,9 +62,13 @@ try:
 except ModuleNotFoundError:
     from scietex.hal.current_amplifier.base import (
         AmplifierState,
+        BandwidthCapabilities,
         CurrentAmplifierCapabilities,
         CurrentAmplifierProtocol,
+        IndicationCapabilities,
+        OutputVoltageCapabilities,
         RegisterMapIncomplete,
+        SelectableCapabilities,
         UnexpectedResponse,
     )
     from scietex.hal.current_amplifier.scietex.ebic.modbus.v1 import (
@@ -171,32 +179,64 @@ def test_constructor_defaults():
     _run(scenario)
 
 
-def test_capabilities_are_empty_class_data():
-    """The relay layer advertises nothing the capability model describes."""
+def test_capabilities_declare_only_static_geometry():
+    """The driver declares the board's fixed analog geometry and nothing more."""
     assert "capabilities" in EBICModbusV1Preamp.__dict__
     capabilities = EBICModbusV1Preamp.capabilities
     assert isinstance(capabilities, CurrentAmplifierCapabilities)
-    assert not any(
-        (
-            capabilities.preamp.range,
-            capabilities.preamp.feedback_resistor,
-            capabilities.boost.gain,
-            capabilities.dc_bias.enabled,
-            capabilities.dc_bias.level,
-            capabilities.bandwidth,
-            capabilities.filters.enabled,
-            capabilities.filters.cutoff,
-            capabilities.input_compensation.enabled,
-            capabilities.input_compensation.level,
-            capabilities.invert_output,
-        )
+
+    preamp = capabilities.preamp
+    assert preamp.max_output_v == 5.0
+    assert isinstance(preamp.feedback_resistor, SelectableCapabilities)
+    assert not preamp.feedback_resistor
+    assert preamp.feedback_resistor.options == ()
+
+    assert capabilities.output_voltage == OutputVoltageCapabilities(
+        min_v=-10.0, max_v=10.0
     )
+    assert capabilities.input_overcurrent == IndicationCapabilities(
+        present=True, read=False
+    )
+    assert capabilities.output_overload == IndicationCapabilities()
+    assert capabilities.bandwidth == BandwidthCapabilities()
+
+    # Every selectable control stays unsupported.
+    assert not capabilities.boost.gain
+    assert not capabilities.dc_bias.enabled
+    assert not capabilities.dc_bias.level
+    assert not capabilities.filters.enabled
+    assert not capabilities.filters.cutoff
+    assert not capabilities.input_compensation.enabled
+    assert not capabilities.input_compensation.level
+    assert not capabilities.invert_output
     assert capabilities.filters.types == ()
-    assert capabilities.bandwidth.options == ()
 
     async def scenario(driver) -> None:
         for name in _CAPABILITY_PROPERTIES + _WRITE_PROPERTIES:
             assert getattr(driver, name) is False
+        assert await driver.read_data() == AmplifierState()
+
+    _run(scenario)
+
+
+def test_driver_geometry_yields_the_documented_full_scale_current():
+    """The driver's geometry reproduces the documented full-scale current."""
+    capabilities = EBICModbusV1Preamp.capabilities
+    # min(preamp.max_output_v, amplifier_swing / G) / Rf from
+    # docs/amplifier-architecture.md section 7.
+    assert capabilities.max_input_current_a(1e6, 1.0) == pytest.approx(5e-6)
+    assert capabilities.max_input_current_a(1e6, 10.0) == pytest.approx(1e-6)
+
+
+def test_driver_declares_overcurrent_present_but_unobservable():
+    """The comparator exists on the board but has no Modbus read path."""
+    capabilities = EBICModbusV1Preamp.capabilities
+    assert capabilities.input_overcurrent.present is True
+    assert capabilities.input_overcurrent.read is False
+
+    async def scenario(driver) -> None:
+        assert driver.supports_input_overcurrent is False
+        assert driver.supports_output_overload is False
 
     _run(scenario)
 

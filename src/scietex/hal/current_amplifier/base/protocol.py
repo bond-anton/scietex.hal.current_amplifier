@@ -27,8 +27,10 @@ current reading is unknown, so the caller must not substitute zero or ``False``.
 
 Status indications are an exception to the method-based surface: input
 overcurrent and output overload are read only through ``read_data()`` and have
-no dedicated accessors. The capability set says whether the driver reports them;
-the snapshot says what they currently are.
+no dedicated accessors. :class:`IndicationCapabilities` separates whether the
+signal exists from whether the firmware can read it; ``supports_input_overcurrent``
+and ``supports_output_overload`` answer observability, while the snapshot says
+what the flag currently is.
 
 Filter kinds are read from ``capabilities.filters.types``; there is no
 per-kind ``supports_*`` property, so adding a :class:`FilterType` never changes
@@ -37,8 +39,13 @@ this class.
 The output voltage range is static geometry rather than a controllable feature,
 so it has no ``supports_*`` property either: a caller reads
 ``capabilities.output_voltage`` directly. The only adjustable gain in this
-device is the boost stage; the preamp selects a range and a feedback resistor,
-which together fix the transimpedance.
+device is the boost stage; the preamp selects one feedback resistor, which fixes
+the transimpedance; the input-current range is derived from that resistor, the
+boost gain and the static clip limits.
+
+A fixed, non-selectable bandwidth is read from
+``capabilities.bandwidth.fixed_hz``. It has no ``supports_*`` truth because
+there is nothing to select.
 
 Classes:
     CurrentAmplifierProtocol: The runtime-checkable protocol every current
@@ -72,9 +79,8 @@ class CurrentAmplifierProtocol(Protocol):
 
     @property
     def supports_preamp(self) -> bool:
-        """Whether the preamp exposes range or feedback-resistor selection."""
-        preamp = self.capabilities.preamp
-        return bool(preamp.range) or bool(preamp.feedback_resistor)
+        """Whether the preamp exposes feedback-resistor selection."""
+        return bool(self.capabilities.preamp.feedback_resistor)
 
     @property
     def supports_boost(self) -> bool:
@@ -90,7 +96,7 @@ class CurrentAmplifierProtocol(Protocol):
 
     @property
     def supports_bandwidth(self) -> bool:
-        """Whether the amplifier exposes bandwidth selection."""
+        """Whether the amplifier exposes selectable bandwidth."""
         return bool(self.capabilities.bandwidth)
 
     @property
@@ -101,13 +107,13 @@ class CurrentAmplifierProtocol(Protocol):
 
     @property
     def supports_input_overcurrent(self) -> bool:
-        """Whether the amplifier reports the input-overcurrent flag."""
-        return bool(self.capabilities.input_overcurrent)
+        """Whether the driver can observe the input-overcurrent signal."""
+        return self.capabilities.input_overcurrent.read
 
     @property
     def supports_output_overload(self) -> bool:
-        """Whether the amplifier reports the output-overload flag."""
-        return bool(self.capabilities.output_overload)
+        """Whether the driver can observe the output-overload signal."""
+        return self.capabilities.output_overload.read
 
     @property
     def supports_input_compensation(self) -> bool:
@@ -122,9 +128,8 @@ class CurrentAmplifierProtocol(Protocol):
 
     @property
     def can_select_preamp(self) -> bool:
-        """Whether the preamp range or feedback resistance can be written."""
-        preamp = self.capabilities.preamp
-        return preamp.range.access.write or preamp.feedback_resistor.access.write
+        """Whether the preamp feedback resistance can be written."""
+        return self.capabilities.preamp.feedback_resistor.access.write
 
     @property
     def can_set_boost(self) -> bool:
@@ -141,7 +146,7 @@ class CurrentAmplifierProtocol(Protocol):
 
     @property
     def can_set_bandwidth(self) -> bool:
-        """Whether bandwidth can be written."""
+        """Whether selectable bandwidth can be written."""
         return self.capabilities.bandwidth.access.write
 
     @property
@@ -182,32 +187,6 @@ class CurrentAmplifierProtocol(Protocol):
                 driver cannot report it.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement read_data()")
-
-    async def get_preamp_range(self) -> float:
-        """
-        Read the preamp range designator.
-
-        Returns:
-            float: The range designator in device-native units, the same units
-                ``capabilities.preamp.range`` enumerates.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement get_preamp_range(); "
-            "capability: preamp.range"
-        )
-
-    async def select_preamp_range(self, range_value: float) -> None:
-        """
-        Select the preamp range.
-
-        Args:
-            range_value: The range designator in device-native units, normally
-                one of ``capabilities.preamp.range.options``.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement select_preamp_range(); "
-            "capability: preamp.range"
-        )
 
     async def get_boost_gain(self) -> float:
         """

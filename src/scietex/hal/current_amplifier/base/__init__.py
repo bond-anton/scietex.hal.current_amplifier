@@ -8,6 +8,7 @@ driver contract concrete protocols implement.
 Classes:
     Access: Whether a setting can be read and whether it can be written.
     AmplifierState: A snapshot of the values an amplifier reports.
+    BandwidthCapabilities: A bandwidth domain and whether it is selectable.
     BoostCapabilities: Boost stage gain selection.
     CompensationCapabilities: Input-capacitance compensation surface.
     CurrentAmplifierCapabilities: The complete capability set for one amplifier.
@@ -17,9 +18,9 @@ Classes:
     FilterCapabilities: Signal-filter surface.
     FilterSetting: One filter in the amplifier's signal path.
     FilterType: The filter responses an amplifier can apply.
-    IndicationCapabilities: A read-only status flag.
+    IndicationCapabilities: A status signal and whether it is readable.
     OutputVoltageCapabilities: Static output voltage swing limits.
-    PreampCapabilities: Preamp range and feedback-resistor selection.
+    PreampCapabilities: Preamp feedback-resistor selection and clip geometry.
     RegisterMapIncomplete: A register needed by the operation is not mapped.
     SelectableCapabilities: An access plus the values it accepts.
     UnexpectedResponse: A response cannot belong to the register it answers.
@@ -33,6 +34,7 @@ Modules:
 
 from .capabilities import (
     Access,
+    BandwidthCapabilities,
     BoostCapabilities,
     CompensationCapabilities,
     CurrentAmplifierCapabilities,
@@ -51,6 +53,7 @@ from .protocol import CurrentAmplifierProtocol
 __all__ = [
     "Access",
     "AmplifierState",
+    "BandwidthCapabilities",
     "BoostCapabilities",
     "CompensationCapabilities",
     "CurrentAmplifierCapabilities",

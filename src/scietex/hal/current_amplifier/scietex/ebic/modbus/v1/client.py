@@ -2,9 +2,12 @@
 
 The firmware in ``ebic_control`` exposes seventeen relay outputs and the
 communication settings that reach them. It has no ADC, DAC, measurement, status
-or unlock register, so this driver implements the relay layer and deliberately
-advertises no amplifier capability; mapping relays to preamp ranges, boost,
-bias or filters is a separate layer that needs the board's relay table.
+or unlock register, so this driver implements the relay layer. It declares only
+what is knowable without the relay map: the pre-amp's 5 V clip point, the
+booster's +/-10 V linear range, and the physical presence of the Overcurrent
+comparator. It declares no selectable control, because the relay-to-function map
+is pending and the ``Rf`` values are unknown, so enumerating
+``feedback_resistor`` would invent data.
 
 The transport is the shared :class:`RS485Client`, which opens the port once per
 operation; ``connect`` therefore has nothing to open and every accessor is a
@@ -47,6 +50,9 @@ from .....base import (
     AmplifierState,
     CurrentAmplifierCapabilities,
     CurrentAmplifierProtocol,
+    IndicationCapabilities,
+    OutputVoltageCapabilities,
+    PreampCapabilities,
     UnexpectedResponse,
 )
 from .constants import (
@@ -67,15 +73,22 @@ class EBICModbusV1Preamp(RS485Client, CurrentAmplifierProtocol):
     """Modbus RTU client for the EBIC v1.0 relay outputs.
 
     Attributes:
-        capabilities: Empty by design. The firmware has no amplifier setting,
-            measurement or status register, so the relay layer advertises
-            nothing the capability model describes.
+        capabilities: The static analog geometry the board fixes regardless of
+            the relay map: the pre-amp clip point, the booster linear range and
+            the physical Overcurrent comparator. No selectable control is
+            declared, because the relay-to-function map is pending and the
+            ``Rf`` values are unknown.
     """
 
-    # The firmware drives relays only: every amplifier capability group stays
-    # unsupported until the relay-to-function map is documented.
-    capabilities: ClassVar[CurrentAmplifierCapabilities] = (
-        CurrentAmplifierCapabilities()
+    # Only the geometry that does not depend on the relay map is declared: the
+    # pre-amp clips at 5 V, the booster is linear over +/-10 V, and the
+    # Overcurrent comparator exists on the board but is unreachable over Modbus.
+    # Every selectable group stays unsupported until the relay-to-function map
+    # and the Rf values are known.
+    capabilities: ClassVar[CurrentAmplifierCapabilities] = CurrentAmplifierCapabilities(
+        preamp=PreampCapabilities(max_output_v=5.0),
+        output_voltage=OutputVoltageCapabilities(min_v=-10.0, max_v=10.0),
+        input_overcurrent=IndicationCapabilities(present=True, read=False),
     )
 
     def __init__(
@@ -118,8 +131,8 @@ class EBICModbusV1Preamp(RS485Client, CurrentAmplifierProtocol):
         """
         Return an empty snapshot.
 
-        The EBIC v1.0 firmware reports no output voltage, current, range, gain,
-        bias, bandwidth, filter or status value. Every field therefore stays
+        The EBIC v1.0 firmware reports no output voltage, current, gain, bias,
+        bandwidth, filter or status value. Every field therefore stays
         ``None`` and the filter tuple stays empty. ``None`` is not zero and not
         ``False``: the quantities are unknown, not idle. Relay levels are read
         through :meth:`read_relays` instead.

@@ -18,7 +18,6 @@ _EXPECTED_FIELD_ORDER = [
     "output_voltage_v",
     "output_current_a",
     "input_current_a",
-    "preamp_range",
     "boost_gain",
     "feedback_resistor_ohm",
     "dc_bias_enabled",
@@ -56,7 +55,6 @@ def test_field_order_is_stable():
 def test_to_builtins_serialises_filter_type_as_string():
     """The snapshot converts to plain builtins with the enum's wire spelling."""
     state = AmplifierState(
-        preamp_range=2.0,
         boost_gain=10.0,
         filters=(
             FilterSetting(
@@ -73,7 +71,6 @@ def test_to_builtins_serialises_filter_type_as_string():
         "output_voltage_v": None,
         "output_current_a": None,
         "input_current_a": None,
-        "preamp_range": 2.0,
         "boost_gain": 10.0,
         "feedback_resistor_ohm": None,
         "dc_bias_enabled": None,
@@ -110,7 +107,7 @@ def test_state_is_frozen():
     state = AmplifierState()
 
     with pytest.raises(AttributeError, match="immutable type"):
-        state.preamp_range = 1.0
+        state.boost_gain = 1.0
 
 
 def test_false_is_distinct_from_none():
