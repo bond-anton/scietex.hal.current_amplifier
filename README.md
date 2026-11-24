@@ -301,10 +301,12 @@ declares the selectable controls the map fixes:
 functions; every other field stays `None`. A pattern that selects no single
 resistor of the active channel, or that does not hold the gain relays one-hot,
 decodes to `None` there, and the matching strict getter raises
-`UnexpectedResponse`. Writes validate before any bus traffic and are
-break-before-make where the map requires it: a same-bank `Rf` change releases the
-old resistor first, and a gain change releases the old stage before engaging the
-new one.
+`UnexpectedResponse`. Writes validate before any bus traffic. A same-bank `Rf`
+change is make-before-break: the target relay engages first, so the loop is never
+commanded open and the transient is the defined parallel pair. A gain change is
+break-before-make: the old stage releases before the new one engages, because the
+gain relays are a one-hot selector. At rest the active channel has exactly one
+engaged `Rf`.
 
 Still unsupported on this board, and therefore absent from both drivers:
 bandwidth, filters, output inversion, bias level, compensation level and every

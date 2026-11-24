@@ -4,8 +4,16 @@ The raw driver speaks coil indices; the firmware gives those coils no meaning.
 This module owns the relay-to-function map and turns coil levels into the
 current amplifier contract: feedback resistor, boost gain, DC bias, input
 compensation and a state snapshot. Every write is validated before any bus
-traffic, and every multi-relay change is sequenced so that a transition never
-leaves two resistors of one feedback bank engaged at the same time.
+traffic. ``Rf`` changes are make-before-break: the target resistor engages
+before the old one releases, so the write order never commands the pre-amp
+feedback loop open and the transimpedance stage is not deliberately left to
+saturate against its output clamp. No settle delay is inserted, so whether the
+new relay actually closes before the old opens depends on the relay operate and
+release times. Two ``Rf`` of one bank share both terminals, so the transient
+parallel pair is electrically defined. Booster gain changes stay break-before-make,
+because a one-hot gain pair has no defined gain and the feedback loop is not
+involved. The active channel therefore always has at least one engaged ``Rf``:
+exactly one at rest, transiently two during a same-bank swap, never zero.
 
 The relay map records the firmware's relay-3 correspondence: ``OUT2`` is the
 low-Z output and ``OUT1`` the high-Z output. The firmware calls relay 3
@@ -339,11 +347,11 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         """
         Select one feedback resistor.
 
-        A same-bank change releases the old resistor before it engages the new
-        one. A cross-bank change engages the new bank's resistor first, then
-        switches the channel relays, then steers the booster source, and only
-        then releases the old resistor, so the amplifier always has a feedback
-        path while the channel moves.
+        A change engages the target resistor before it releases the old one, so
+        the active channel always keeps a feedback path. A cross-bank change
+        also switches the channel relays and steers the booster source between
+        the two ``Rf`` writes, so the amplifier follows the new channel while the
+        transient parallel pair holds the loop closed.
 
         Args:
             resistance_ohm: One of ``RF_OHMS``, in ohm.
@@ -512,22 +520,20 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
     ) -> list[tuple[Relay, bool]]:
         """Return the coil-level steps that select ``resistance`` from ``current``.
 
-        Only the eight ``Rf`` relays are considered for release. Deselecting
-        every engaged relay would also switch off bias, gain, compensation and
-        the channel selectors.
+        The target relay is engaged before every other ``Rf`` relay is released,
+        so a same-bank swap briefly closes the parallel pair and the feedback
+        loop never opens. Only the eight ``Rf`` relays are considered for
+        release. Deselecting every engaged relay would also switch off bias,
+        gain, compensation and the channel selectors.
         """
         target_relay = RF_RELAY[resistance]
         target_channel = RF_CHANNEL[target_relay]
-        observed_channel = decode_coils(current).channel
-        cross_bank = (
-            observed_channel is not None and target_channel is not observed_channel
-        )
 
         rf_relays = set(RF_RELAY.values())
         engaged_rf = [relay for relay in engaged_relays(current) if relay in rf_relays]
 
         steps: list[tuple[Relay, bool]] = []
-        if cross_bank and target_relay not in engaged_rf:
+        if target_relay not in engaged_rf:
             steps.append((target_relay, coil_level(target_relay, True)))
         steps.append((Relay.CHANNEL_SELECT, CHANNEL_COILS[target_channel]))
         steps.append((Relay.DESELECTED_FEEDBACK, CHANNEL_COILS[target_channel]))
@@ -535,8 +541,6 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         for relay in engaged_rf:
             if relay is not target_relay:
                 steps.append((relay, coil_level(relay, False)))
-        if not cross_bank:
-            steps.append((target_relay, coil_level(target_relay, True)))
         return steps
 
     async def _transition(

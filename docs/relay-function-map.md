@@ -115,11 +115,14 @@ asserted by the firmware.
 | high-Z channel | 10 GΩ, 1 GΩ, 100 MΩ, 10 MΩ | 5–8 |
 | low-Z channel | 1 MΩ, 100 kΩ, 10 kΩ, 1 kΩ | 9–12 |
 
-Exactly one resistor per channel is intended. Combined feedback resistors are out
-of scope for this driver: the contract exposes the eight discrete `Rf` values and
-the driver enforces exactly one engaged `Rf` per bank on every write. The
-physical result of two closed same-bank relays is not needed because the
-combination is unsupported by decision.
+Exactly one resistor per channel is engaged at rest — after a completed write and
+the driver's verification read. Combined feedback resistors are not a supported
+*selection*: the contract exposes the eight discrete `Rf` values and a readback
+naming zero or several resistors of the active channel decodes to `None`. The
+four same-bank `Rf` resistors share both terminals, so a same-bank change passes
+through a genuine parallel pair (`R1*R2/(R1+R2)`) under make-before-break (§4 of
+the architecture doc); that transient is electrically defined but never a target
+selection.
 
 ## Booster gain coding
 
@@ -178,16 +181,19 @@ statement with the driver policy built on it.
       selects otherwise. The DAC on the other branch is an external device the
       firmware never drives and no Modbus write reaches (see "Source" and the
       relay-13 row above).
-- [x] **Two `Rf` relays closed in one channel.** The driver enforces exactly one
-      `Rf` per bank on every write; a readback that names zero or several
-      resistors of the active channel decodes to `None`, and the strict getter
-      raises `UnexpectedResponse`. Combined feedback resistors are unsupported by
-      decision, so their physical behaviour is not needed.
-- [x] **Gain / in-bank `Rf` break-before-make.** The transition engine releases
-      the old stage before engaging the new one, so a gain change or a same-bank
-      `Rf` change is break-before-make. The resulting output transient is a
-      hardware property the driver cannot measure; downstream consumers should
-      expect it.
+- [x] **Two `Rf` relays closed in one channel.** At rest the driver enforces
+      exactly one `Rf` per bank; a readback that names zero or several resistors
+      of the active channel decodes to `None`, and the strict getter raises
+      `UnexpectedResponse`. A same-bank change passes through a parallel pair
+      (make-before-break), which is electrically defined but not a supported
+      selection; a readback taken mid-transition is ambiguous and also decodes to
+      `None`.
+- [x] **Gain break-before-make, `Rf` make-before-break.** A gain change releases
+      the old stage before engaging the new one (the gain relays are one-hot, so
+      two closed relays are undefined); a same-bank `Rf` change engages the target
+      before releasing the old one (shared terminals, defined parallel transient,
+      loop never commanded open). The output transient on a gain change is a hardware
+      property the driver cannot measure; downstream consumers should expect it.
 - [x] **Overcurrent.** No ADC, no discrete-input function code and no MCU input
       pin reach the signal, so it is unobservable through this firmware; whether
       it reaches a connector is hardware-documentation only.
@@ -216,9 +222,10 @@ it fixes:
   `get_booster_source` / `set_booster_source` extension.
 - **Chosen code defaults:** the booster always tracks the selected channel
   (`relaymap.BOOSTER_COILS`; low-Z → relay-3 coil 1, high-Z → coil 0), with
-  `set_booster_source(out2)` as the manual override; break-before-make ordering
-  for gain and in-bank `Rf` changes; and exactly one `Rf` per bank on every
-  write.
+  `set_booster_source(out2)` as the manual override; make-before-break ordering
+  for same-bank `Rf` changes (loop never commanded open, parallel transient); and
+  break-before-make ordering for gain changes (one-hot selector); at rest, exactly
+  one `Rf` per bank.
 - The full-scale current `min(5, 10/G) / Rf` is derived in
   [amplifier-architecture.md §7](amplifier-architecture.md#7-limits-and-full-scale-current);
   it is not restated here.

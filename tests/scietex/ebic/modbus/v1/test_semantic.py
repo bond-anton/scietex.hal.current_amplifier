@@ -154,12 +154,26 @@ def _engaged_gains(coils) -> list[Relay]:
     ]
 
 
-def _assert_one_rf_per_bank(states) -> None:
-    """Assert no state leaves two feedback relays of one bank engaged."""
+def _assert_feedback_path_never_opens(states) -> bool:
+    """Assert every replayed state keeps a feedback path closed.
+
+    Returns whether a same-bank parallel pair appears, which is the
+    make-before-break signature: the active channel transiently has two engaged
+    ``Rf`` instead of zero.
+    """
+    saw_parallel_pair = False
     for coils in states:
         counts = _rf_bank_counts(coils)
-        assert counts[RfChannel.LOW_Z] <= 1
-        assert counts[RfChannel.HIGH_Z] <= 1
+        channel = decode_coils(coils).channel
+        if channel is None:
+            # The one-write gap between relays 1 and 2 leaves the channel
+            # undecoded; a feedback path must still be closed somewhere.
+            assert sum(counts.values()) >= 1
+        else:
+            assert counts[channel] >= 1
+        if max(counts.values()) == 2:
+            saw_parallel_pair = True
+    return saw_parallel_pair
 
 
 # -- polarity ---------------------------------------------------------------
@@ -182,14 +196,14 @@ async def test_enable_setters_write_the_inverted_coil_level():
 
 
 @pytest.mark.asyncio
-async def test_selecting_a_same_bank_resistor_releases_the_old_one_first():
-    """Power-on is 1 kOhm, so 10 kOhm releases coil 11 before engaging coil 10."""
+async def test_selecting_a_same_bank_resistor_engages_the_new_one_first():
+    """Power-on is 1 kOhm, so 10 kOhm engages coil 10 before releasing coil 11."""
     fake = FakeRelayAccess()
     driver = _driver(fake)
 
     await driver.select_feedback_resistor(10_000)
 
-    assert fake.writes == [(11, False), (10, False)]
+    assert fake.writes == [(10, False), (11, False)]
 
 
 @pytest.mark.asyncio
@@ -205,27 +219,30 @@ async def test_selecting_the_engaged_resistor_writes_nothing():
 
 
 @pytest.mark.asyncio
-async def test_selecting_one_kilohm_from_ten_kilohm_is_old_before_new():
-    """The 10 kOhm relay is released before the 1 kOhm relay engages."""
+async def test_selecting_one_kilohm_from_ten_kilohm_is_new_before_old():
+    """The 1 kOhm relay engages before the 10 kOhm relay is released."""
     fake = FakeRelayAccess(_coils(Relay.RF_LOW_10K))
     driver = _driver(fake)
 
     await driver.select_feedback_resistor(1_000)
 
-    assert fake.writes == [(10, True), (11, True)]
+    assert fake.writes == [(11, True), (10, True)]
 
 
 @pytest.mark.asyncio
-async def test_same_bank_transition_never_closes_two_feedback_relays():
-    """1 kOhm to 10 kOhm releases coil 11 before coil 10 is engaged."""
+async def test_a_same_bank_swap_closes_both_resistors_before_breaking():
+    """1 kOhm to 10 kOhm engages coil 10 first, so both low-bank relays close."""
     fake = FakeRelayAccess()
     driver = _driver(fake)
 
     await driver.select_feedback_resistor(10_000)
 
-    assert [index for index, _ in fake.writes] == [11, 10]
+    assert [index for index, _ in fake.writes] == [10, 11]
     _, states = _replay(POWER_ON_COILS, fake.writes)
-    _assert_one_rf_per_bank(states)
+    assert _assert_feedback_path_never_opens(states) is True
+    assert _rf_bank_counts(states[1])[RfChannel.LOW_Z] == 2
+    assert _rf_bank_counts(states[-1])[RfChannel.LOW_Z] == 1
+    assert decode_coils(states[-1]).feedback_resistor_ohm == 10_000.0
 
 
 @pytest.mark.asyncio
@@ -238,7 +255,7 @@ async def test_cross_bank_transition_engages_then_switches_then_releases():
 
     assert fake.writes == [(7, False), (0, False), (1, False), (2, False), (11, False)]
     final, states = _replay(POWER_ON_COILS, fake.writes)
-    _assert_one_rf_per_bank(states)
+    assert _assert_feedback_path_never_opens(states) is False
     assert final == tuple(fake.coils)
     readback = decode_coils(final)
     assert readback.channel is RfChannel.HIGH_Z
@@ -246,8 +263,9 @@ async def test_cross_bank_transition_engages_then_switches_then_releases():
 
 
 @pytest.mark.asyncio
-async def test_every_feedback_selection_ends_with_one_resistor_of_its_channel():
-    """All eight selections keep the one-Rf-per-bank invariant at every step."""
+async def test_every_feedback_selection_keeps_a_feedback_path_closed():
+    """All eight selections never leave the active channel without an engaged Rf."""
+    saw_parallel_pair = False
     for ohm in RF_OHMS:
         fake = FakeRelayAccess()
         driver = _driver(fake)
@@ -255,10 +273,14 @@ async def test_every_feedback_selection_ends_with_one_resistor_of_its_channel():
         await driver.select_feedback_resistor(ohm)
 
         final, states = _replay(POWER_ON_COILS, fake.writes)
-        _assert_one_rf_per_bank(states)
+        saw_parallel_pair |= _assert_feedback_path_never_opens(states)
         readback = decode_coils(final)
         assert readback.channel is RF_CHANNEL[RF_RELAY[int(ohm)]]
         assert readback.feedback_resistor_ohm == ohm
+        counts = _rf_bank_counts(final)
+        assert counts[readback.channel] == 1
+        assert sum(counts.values()) == 1
+    assert saw_parallel_pair, "no same-bank swap closed the parallel pair"
 
 
 @pytest.mark.asyncio
@@ -459,6 +481,35 @@ async def test_a_failed_write_reports_the_coil_and_the_half_applied_vector():
     count = len(fake.writes)
     assert count == 2
     assert len(fake.writes) == count
+
+
+@pytest.mark.asyncio
+async def test_a_failed_same_bank_release_leaves_a_parallel_pair_and_recovers():
+    """A release that raises leaves both resistors; a later select trims to one."""
+    fake = FakeRelayAccess(fail_at=2)
+    driver = _driver(fake)
+
+    with pytest.raises(RelayTransitionError) as excinfo:
+        await driver.select_feedback_resistor(10_000)
+
+    error = excinfo.value
+    assert error.operation == "select feedback resistor"
+    assert error.failed_coil == coil_index(Relay.RF_LOW_1K)
+    assert error.target[coil_index(Relay.RF_LOW_10K)] is False
+    assert error.target[coil_index(Relay.RF_LOW_1K)] is False
+    assert len(fake.writes) == 2
+    assert _rf_bank_counts(fake.coils)[RfChannel.LOW_Z] == 2
+
+    state = await driver.read_data()
+    assert state.feedback_resistor_ohm is None
+    with pytest.raises(UnexpectedResponse):
+        await driver.get_feedback_resistor()
+
+    fake.fail_at = None
+    await driver.select_feedback_resistor(1_000)
+
+    assert _rf_bank_counts(fake.coils)[RfChannel.LOW_Z] == 1
+    assert decode_coils(fake.coils).feedback_resistor_ohm == 1_000.0
 
 
 @pytest.mark.asyncio
