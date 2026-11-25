@@ -9,14 +9,19 @@ comparator. The relay-to-function map now fixes the selectable controls, but thi
 driver still addresses raw coils, so the semantic layer built on it
 (``semantic.EBICModbusV1Amplifier``) declares them.
 
-The transport is the shared :class:`RS485Client`, which opens the port once per
-operation; ``connect`` therefore has nothing to open and every accessor is a
-coroutine. All requests carry the address the instance was built with. A slave
-address or baud change is acknowledged at the old settings and followed by a
-firmware restart after ``REBOOT_DELAY_S``; see the setters for the consequences.
+The request layer is transport-independent: :class:`_RelayRequests` builds the
+coil and register requests and reaches the device only through ``execute``.
+:class:`EBICModbusV1Preamp` supplies the serial transport -- the shared
+:class:`RS485Client`, which opens the port once per operation -- so ``connect``
+has nothing to open and every accessor is a coroutine. A TCP sibling can reuse
+the request layer by wiring ``execute`` to a different connection. All requests
+carry the address the instance was built with. A slave address or baud change is
+acknowledged at the old settings and followed by a firmware restart after
+``REBOOT_DELAY_S``; see the setters for the consequences.
 
 Classes:
-    EBICModbusV1Preamp: The EBIC v1.0 relay driver.
+    _RelayRequests: The transport-independent coil and register request layer.
+    EBICModbusV1Preamp: The EBIC v1.0 relay driver over RS485/RTU.
 """
 
 from collections.abc import Sequence
@@ -69,78 +74,32 @@ from .constants import (
 from .identity import IDENTITY_REGISTER_COUNT, DeviceIdentity, decode_identity
 
 
-class EBICModbusV1Preamp(RS485Client, CurrentAmplifierProtocol):
-    """Modbus RTU client for the EBIC v1.0 relay outputs.
+class _RelayRequests:
+    """The transport-independent request layer of the EBIC v1.0 relay driver.
+
+    Every accessor here talks to the device only through :meth:`execute`, so a
+    sibling transport (RS485 today, TCP next) reuses the coil and register
+    protocol and supplies nothing but the connection. Subclasses provide the
+    three attributes and override :meth:`execute`.
 
     Attributes:
-        capabilities: The static analog geometry the board fixes: the pre-amp
-            clip point, the booster linear range and the physical Overcurrent
-            comparator. No selectable control is declared here, because this
-            class drives coils rather than functions; the semantic layer owns the
-            relay map and declares the selectable groups.
+        address: Modbus slave address carried by every request.
+        label: Human-readable label used in error messages.
+        logger: Logger for transport diagnostics.
     """
 
-    # Only geometry is declared on the raw driver: it speaks coil indices, not
-    # functions. The pre-amp clips at 5 V, the booster is linear over +/-10 V,
-    # and the Overcurrent comparator exists on the board but is unreachable over
-    # Modbus. The selectable groups are declared by the semantic layer, which
-    # owns the relay-to-function map and the Rf values.
-    capabilities: ClassVar[CurrentAmplifierCapabilities] = CurrentAmplifierCapabilities(
-        preamp=PreampCapabilities(max_output_v=5.0),
-        output_voltage=OutputVoltageCapabilities(min_v=-10.0, max_v=10.0),
-        input_overcurrent=IndicationCapabilities(present=True, read=False),
-    )
+    address: int
+    label: str
+    logger: Logger
 
-    def __init__(
+    async def execute(
         self,
-        con_params: SerialConnectionConfig | ModbusSerialConnectionConfig,
-        address: int = DEFAULT_SLAVE_ADDRESS,
-        label: str = "EBIC Preamp",
-        logger: Logger | None = None,
-    ) -> None:
-        """
-        Initialize the client.
-
-        Args:
-            con_params: Serial port and framing configuration.
-            address: Modbus slave address the device answers at.
-            label: Human-readable label used in log messages.
-            logger: Optional logger for transport diagnostics.
-        """
-        super().__init__(
-            con_params=con_params,
-            address=address,
-            label=label,
-            logger=logger,
-        )
-
-    async def connect(self) -> None:
-        """Nothing to open: the serial client connects once per operation."""
-        self.logger.debug("%s: Connect (per-operation serial client).", self.label)
-
-    async def close(self) -> None:
-        """Close the underlying Modbus client and release the serial port."""
-        await super().close()
-
-    # `RS485Client.read_data` returns a raw register dictionary; the current
-    # amplifier contract replaces it with a typed snapshot, so the override is
-    # deliberate and the Liskov warning is expected. Remove the ignore once the
-    # serial client's `read_data` matches the contract signature or the contract
-    # stops narrowing the return type.
-    async def read_data(self) -> AmplifierState:  # ty: ignore[incompatible-method-override]
-        """
-        Return an empty snapshot.
-
-        The EBIC v1.0 firmware reports no output voltage, current, gain, bias,
-        bandwidth, filter or status value. Every field therefore stays
-        ``None`` and the filter tuple stays empty. ``None`` is not zero and not
-        ``False``: the quantities are unknown, not idle. Relay levels are read
-        through :meth:`read_relays` instead.
-
-        Returns:
-            AmplifierState: A snapshot with every field unset.
-        """
-        return AmplifierState()
+        request: ModbusPDU,
+        no_response_expected: bool = False,
+        raise_on_error: bool = True,
+    ) -> ModbusPDU | None:
+        """Send one request and return its response. Overridden by a transport."""
+        raise NotImplementedError
 
     # -- relays ------------------------------------------------------------
 
@@ -469,6 +428,80 @@ class EBICModbusV1Preamp(RS485Client, CurrentAmplifierProtocol):
                 label,
                 f"expected echo of register {address} = {value}, got {response!r}",
             )
+
+
+class EBICModbusV1Preamp(RS485Client, _RelayRequests, CurrentAmplifierProtocol):
+    """Modbus RTU client for the EBIC v1.0 relay outputs.
+
+    Attributes:
+        capabilities: The static analog geometry the board fixes: the pre-amp
+            clip point, the booster linear range and the physical Overcurrent
+            comparator. No selectable control is declared here, because this
+            class drives coils rather than functions; the semantic layer owns the
+            relay map and declares the selectable groups.
+    """
+
+    # Only geometry is declared on the raw driver: it speaks coil indices, not
+    # functions. The pre-amp clips at 5 V, the booster is linear over +/-10 V,
+    # and the Overcurrent comparator exists on the board but is unreachable over
+    # Modbus. The selectable groups are declared by the semantic layer, which
+    # owns the relay-to-function map and the Rf values.
+    capabilities: ClassVar[CurrentAmplifierCapabilities] = CurrentAmplifierCapabilities(
+        preamp=PreampCapabilities(max_output_v=5.0),
+        output_voltage=OutputVoltageCapabilities(min_v=-10.0, max_v=10.0),
+        input_overcurrent=IndicationCapabilities(present=True, read=False),
+    )
+
+    def __init__(
+        self,
+        con_params: SerialConnectionConfig | ModbusSerialConnectionConfig,
+        address: int = DEFAULT_SLAVE_ADDRESS,
+        label: str = "EBIC Preamp",
+        logger: Logger | None = None,
+    ) -> None:
+        """
+        Initialize the client.
+
+        Args:
+            con_params: Serial port and framing configuration.
+            address: Modbus slave address the device answers at.
+            label: Human-readable label used in log messages.
+            logger: Optional logger for transport diagnostics.
+        """
+        super().__init__(
+            con_params=con_params,
+            address=address,
+            label=label,
+            logger=logger,
+        )
+
+    async def connect(self) -> None:
+        """Nothing to open: the serial client connects once per operation."""
+        self.logger.debug("%s: Connect (per-operation serial client).", self.label)
+
+    async def close(self) -> None:
+        """Close the underlying Modbus client and release the serial port."""
+        await super().close()
+
+    # `RS485Client.read_data` returns a raw register dictionary; the current
+    # amplifier contract replaces it with a typed snapshot, so the override is
+    # deliberate and the Liskov warning is expected. Remove the ignore once the
+    # serial client's `read_data` matches the contract signature or the contract
+    # stops narrowing the return type.
+    async def read_data(self) -> AmplifierState:  # ty: ignore[incompatible-method-override]
+        """
+        Return an empty snapshot.
+
+        The EBIC v1.0 firmware reports no output voltage, current, gain, bias,
+        bandwidth, filter or status value. Every field therefore stays
+        ``None`` and the filter tuple stays empty. ``None`` is not zero and not
+        ``False``: the quantities are unknown, not idle. Relay levels are read
+        through :meth:`read_relays` instead.
+
+        Returns:
+            AmplifierState: A snapshot with every field unset.
+        """
+        return AmplifierState()
 
 
 def _check_relay_index(index: int) -> None:

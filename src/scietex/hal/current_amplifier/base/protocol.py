@@ -170,8 +170,15 @@ class CurrentAmplifierProtocol(Protocol):
         """Whether output-polarity inversion can be written."""
         return self.capabilities.invert_output.write
 
-    async def connect(self) -> None:
-        """Open the transport to the amplifier."""
+    async def connect(self) -> bool | None:
+        """Open the transport to the amplifier.
+
+        Returns:
+            bool | None: ``True`` when a transport that reports its own success
+                opened a connection, ``None`` when the implementation has
+                nothing to open. A failure raises instead of returning
+                ``False``.
+        """
         raise NotImplementedError(f"{type(self).__name__} must implement connect()")
 
     async def close(self) -> None:

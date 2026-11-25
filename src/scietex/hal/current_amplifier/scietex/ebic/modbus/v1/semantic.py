@@ -40,6 +40,7 @@ Classes:
     RelayAccess: The relay operations the semantic layer needs from a transport.
     RelayTransitionError: A relay could not be driven to the requested state.
     EBICModbusV1Amplifier: The EBIC v1.0 amplifier driver.
+    EBICModbusV1TcpAmplifier: The same driver over a Modbus/TCP gateway.
 """
 
 import asyncio
@@ -68,6 +69,7 @@ from .....base import (
     UnexpectedResponse,
 )
 from .client import EBICModbusV1Preamp
+from .client_tcp import EBICModbusV1PreampTcp
 from .constants import DEFAULT_SLAVE_ADDRESS
 from .relaymap import (
     BOOSTER_COILS,
@@ -118,8 +120,8 @@ class RelayAccess(Protocol):
     polarity belongs to the relay map, not to the transport.
     """
 
-    async def connect(self) -> None:
-        """Open the transport."""
+    async def connect(self) -> bool | None:
+        """Open the transport, reporting success where the transport can."""
         ...
 
     async def close(self) -> None:
@@ -665,6 +667,71 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             return tuple(await self.relays.read_relays())
         except Exception:
             return None
+
+
+class EBICModbusV1TcpAmplifier(EBICModbusV1Amplifier):
+    """Current amplifier contract over the EBIC v1.0 board on Modbus/TCP.
+
+    The relay map, the write validation and the transition engine are inherited
+    unchanged; this class only fixes the transport to a board reached through a
+    Modbus/TCP gateway. The TCP preamp it injects satisfies :class:`RelayAccess`,
+    so every operation drives the same coils as the serial path.
+
+    Attributes:
+        relays: The Modbus/TCP relay transport every operation is forwarded to.
+        relay_settle_s: The delay inserted after a make write before the writes
+            that depend on it, in seconds.
+    """
+
+    # The parameters mirror the serial semantic class and replace the serial
+    # configuration with the gateway endpoint. The transport is fixed here: a
+    # caller that wants to inject its own relay driver uses the base class.
+    def __init__(  # noqa: PLR0913, PLR0917
+        self,
+        host: str,
+        port: int = 502,
+        address: int = DEFAULT_SLAVE_ADDRESS,
+        label: str = "EBIC Preamp",
+        timeout: float = 6.0,
+        retries: int = 0,
+        logger: Logger | None = None,
+        *,
+        relay_settle_s: float = DEFAULT_RELAY_SETTLE_S,
+    ) -> None:
+        """
+        Initialize the amplifier.
+
+        Args:
+            host: Gateway host name or address.
+            port: Gateway TCP port.
+            address: Modbus address the gateway routes to the device.
+            label: Human-readable label used by the raw driver in log messages.
+            timeout: Per-request timeout in seconds.
+            retries: Retries pymodbus performs per request. The default of zero
+                keeps an ambiguous write from being sent twice.
+            logger: Optional logger for transport diagnostics.
+            relay_settle_s: Seconds to wait after a make write before the writes
+                that depend on it. ``0`` disables the wait.
+
+        Raises:
+            ValueError: If ``relay_settle_s`` is negative or not a number, before
+                any bus traffic.
+        """
+        relay_driver = EBICModbusV1PreampTcp(  # ty: ignore[abstract-class-instantiation]
+            host=host,
+            port=port,
+            address=address,
+            label=label,
+            timeout=timeout,
+            retries=retries,
+            logger=logger,
+        )
+        super().__init__(
+            label=label,
+            logger=logger,
+            relay_driver=relay_driver,
+            relay_settle_s=relay_settle_s,
+        )
 
 
 def _feedback_resistance(resistance_ohm: float) -> int:

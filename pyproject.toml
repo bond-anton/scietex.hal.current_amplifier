@@ -36,6 +36,8 @@ dependencies = [
 [project.entry-points."scietex.hal.current_amplifier.drivers"]
 ebic_modbus_v1_preamp = "scietex.hal.current_amplifier.scietex.ebic.modbus.v1:EBICModbusV1Preamp"
 ebic_modbus_v1 = "scietex.hal.current_amplifier.scietex.ebic.modbus.v1:EBICModbusV1Amplifier"
+ebic_modbus_tcp_v1_preamp = "scietex.hal.current_amplifier.scietex.ebic.modbus.v1:EBICModbusV1PreampTcp"
+ebic_modbus_tcp_v1 = "scietex.hal.current_amplifier.scietex.ebic.modbus.v1:EBICModbusV1TcpAmplifier"
 
 [project.optional-dependencies]
 dev = ["tox>=4.46.0"]
