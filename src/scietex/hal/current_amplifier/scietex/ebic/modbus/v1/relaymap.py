@@ -13,7 +13,8 @@ The map transcribes ``docs/relay-function-map.md``, which in turn transcribes th
 Classes:
     Relay: The seventeen relay outputs, numbered 1-17.
     RfChannel: The two input-path channels relays 1 and 2 select.
-    BiasCompensationSource: The source relay 13 selects.
+    BiasCompensationSource: The source relay 13 selects, re-exported from the
+        base capability model.
     RelayReadback: The function state a coil snapshot encodes.
 
 Constants:
@@ -36,6 +37,8 @@ Functions:
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, IntEnum
+
+from .....base import BiasCompensationSource
 
 
 class Relay(IntEnum):
@@ -73,13 +76,6 @@ class RfChannel(str, Enum):
 
     LOW_Z = "low_z"
     HIGH_Z = "high_z"
-
-
-class BiasCompensationSource(str, Enum):
-    """The source relay 13 selects for bias and compensation together."""
-
-    DAC = "dac"
-    MANUAL = "manual"
 
 
 RF_OHMS: tuple[float, ...] = (

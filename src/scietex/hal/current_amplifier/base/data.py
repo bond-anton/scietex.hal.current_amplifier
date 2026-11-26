@@ -14,7 +14,7 @@ reads and documents the conversion in the driver.
 
 import msgspec
 
-from .capabilities import FilterType
+from .capabilities import BiasCompensationSource, FilterType
 
 
 class FilterSetting(msgspec.Struct, frozen=True, kw_only=True):
@@ -68,6 +68,8 @@ class AmplifierState(msgspec.Struct, frozen=True, kw_only=True):
             on, or ``None`` when unreadable.
         input_compensation_level: Compensation level in device-native units, or
             ``None`` when unreadable.
+        bias_compensation_source: The source the device selects for DC bias and
+            input compensation together, or ``None`` when unreadable.
         inverted: Whether the output polarity is inverted, or ``None`` when
             unreadable.
     """
@@ -85,4 +87,5 @@ class AmplifierState(msgspec.Struct, frozen=True, kw_only=True):
     output_overload: bool | None = None
     input_compensation_enabled: bool | None = None
     input_compensation_level: float | None = None
+    bias_compensation_source: BiasCompensationSource | None = None
     inverted: bool | None = None

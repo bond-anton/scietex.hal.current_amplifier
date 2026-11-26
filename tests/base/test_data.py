@@ -4,13 +4,19 @@ import msgspec
 import pytest
 
 try:
-    from src.scietex.hal.current_amplifier.base.capabilities import FilterType
+    from src.scietex.hal.current_amplifier.base.capabilities import (
+        BiasCompensationSource,
+        FilterType,
+    )
     from src.scietex.hal.current_amplifier.base.data import (
         AmplifierState,
         FilterSetting,
     )
 except ModuleNotFoundError:
-    from scietex.hal.current_amplifier.base.capabilities import FilterType
+    from scietex.hal.current_amplifier.base.capabilities import (
+        BiasCompensationSource,
+        FilterType,
+    )
     from scietex.hal.current_amplifier.base.data import AmplifierState, FilterSetting
 
 
@@ -28,6 +34,7 @@ _EXPECTED_FIELD_ORDER = [
     "output_overload",
     "input_compensation_enabled",
     "input_compensation_level",
+    "bias_compensation_source",
     "inverted",
 ]
 
@@ -56,6 +63,7 @@ def test_to_builtins_serialises_filter_type_as_string():
     """The snapshot converts to plain builtins with the enum's wire spelling."""
     state = AmplifierState(
         boost_gain=10.0,
+        bias_compensation_source=BiasCompensationSource.MANUAL,
         filters=(
             FilterSetting(
                 type=FilterType.LOW_PASS,
@@ -88,9 +96,24 @@ def test_to_builtins_serialises_filter_type_as_string():
         "output_overload": None,
         "input_compensation_enabled": None,
         "input_compensation_level": None,
+        "bias_compensation_source": "manual",
         "inverted": False,
     }
     assert list(msgspec.to_builtins(state)) == _EXPECTED_FIELD_ORDER
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (BiasCompensationSource.MANUAL, "manual"),
+        (BiasCompensationSource.DAC, "dac"),
+    ],
+)
+def test_bias_compensation_source_serialises_as_its_wire_spelling(source, expected):
+    """The shared source selector serialises as the enum's string value."""
+    state = AmplifierState(bias_compensation_source=source)
+
+    assert msgspec.to_builtins(state)["bias_compensation_source"] == expected
 
 
 def test_filter_setting_is_frozen():

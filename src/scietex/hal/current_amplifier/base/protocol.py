@@ -54,7 +54,11 @@ Classes:
 
 from typing import ClassVar, Protocol, runtime_checkable
 
-from .capabilities import CurrentAmplifierCapabilities, FilterType
+from .capabilities import (
+    BiasCompensationSource,
+    CurrentAmplifierCapabilities,
+    FilterType,
+)
 from .data import AmplifierState, FilterSetting
 
 
@@ -391,6 +395,21 @@ class CurrentAmplifierProtocol(Protocol):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement "
             "set_input_compensation_level(); capability: input_compensation.level"
+        )
+
+    async def set_bias_compensation_source(
+        self, source: BiasCompensationSource
+    ) -> None:
+        """
+        Select the source that feeds DC bias and input compensation together.
+
+        Args:
+            source: The source to select, normally one of
+                ``capabilities.bias_compensation_source.options``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement "
+            "set_bias_compensation_source(); capability: bias_compensation_source"
         )
 
     async def get_inverted(self) -> bool:

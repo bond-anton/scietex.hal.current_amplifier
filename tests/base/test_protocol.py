@@ -9,6 +9,7 @@ try:
     from src.scietex.hal.current_amplifier.base import (
         AmplifierState,
         BandwidthCapabilities,
+        BiasCompensationSource,
         CurrentAmplifierCapabilities,
         CurrentAmplifierProtocol,
         FilterSetting,
@@ -19,6 +20,7 @@ except ModuleNotFoundError:
     from scietex.hal.current_amplifier.base import (
         AmplifierState,
         BandwidthCapabilities,
+        BiasCompensationSource,
         CurrentAmplifierCapabilities,
         CurrentAmplifierProtocol,
         FilterSetting,
@@ -143,6 +145,7 @@ _OPTIONAL_CALLS = [
     ("set_input_compensation", (True,)),
     ("get_input_compensation_level", ()),
     ("set_input_compensation_level", (0.5,)),
+    ("set_bias_compensation_source", (BiasCompensationSource.MANUAL,)),
     ("get_inverted", ()),
     ("set_inverted", (True,)),
 ]
@@ -171,10 +174,10 @@ _CAN_PROPERTIES = [
 
 
 def test_optional_call_table_covers_every_optional_method():
-    """The table matches the protocol exactly: 18 optional coroutines."""
+    """The table matches the protocol exactly: 19 optional coroutines."""
     table_names = [name for name, _ in _OPTIONAL_CALLS]
 
-    assert len(table_names) == len(set(table_names)) == 18
+    assert len(table_names) == len(set(table_names)) == 19
     assert set(table_names) == _protocol_methods()
     assert all(
         inspect.iscoroutinefunction(getattr(MinimalAmplifier, name))
@@ -236,6 +239,17 @@ async def test_preamp_and_boost_messages_name_their_capability(method_name, capa
     assert f"capability: {capability}" in message
     if capability.startswith("preamp"):
         assert "gain" not in message
+
+
+@pytest.mark.asyncio
+async def test_bias_compensation_source_default_names_its_capability():
+    """The unimplemented source setter points at the shared selector group."""
+    amplifier = MinimalAmplifier()
+
+    with pytest.raises(
+        NotImplementedError, match="capability: bias_compensation_source"
+    ):
+        await amplifier.set_bias_compensation_source(BiasCompensationSource.DAC)
 
 
 @pytest.mark.parametrize("property_name", _SUPPORT_PROPERTIES + _CAN_PROPERTIES)

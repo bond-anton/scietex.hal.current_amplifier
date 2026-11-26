@@ -8,6 +8,7 @@ try:
     from src.scietex.hal.current_amplifier.base.capabilities import (
         Access,
         BandwidthCapabilities,
+        BiasCompensationSource,
         BoostCapabilities,
         CompensationCapabilities,
         CurrentAmplifierCapabilities,
@@ -23,6 +24,7 @@ except ModuleNotFoundError:
     from scietex.hal.current_amplifier.base.capabilities import (
         Access,
         BandwidthCapabilities,
+        BiasCompensationSource,
         BoostCapabilities,
         CompensationCapabilities,
         CurrentAmplifierCapabilities,
@@ -64,9 +66,12 @@ def test_defaults_advertise_nothing():
     assert capabilities.output_overload.read is False
     assert capabilities.input_compensation.enabled == Access(False, False)
     assert capabilities.input_compensation.level == Access(False, False)
+    assert capabilities.bias_compensation_source.access == Access(False, False)
+    assert capabilities.bias_compensation_source.options == ()
     assert capabilities.invert_output == Access(False, False)
     assert capabilities.bandwidth.options == ()
     assert capabilities.filters.types == ()
+    assert bool(capabilities.bias_compensation_source) is False
 
 
 def test_boost_default_gain_is_unity_on_a_fresh_instance():
@@ -166,6 +171,29 @@ def test_filter_type_is_a_string_enum():
     """The filter member value is the wire spelling a driver sends."""
     assert FilterType.LOW_PASS == "low_pass"
     assert isinstance(FilterType.LOW_PASS, str)
+
+
+def test_bias_compensation_source_is_a_string_enum():
+    """The source member value is the wire spelling a driver sends."""
+    assert BiasCompensationSource.MANUAL == "manual"
+    assert BiasCompensationSource.DAC == "dac"
+    assert isinstance(BiasCompensationSource.MANUAL, str)
+    assert [source.value for source in BiasCompensationSource] == ["dac", "manual"]
+
+
+def test_bias_compensation_source_group_is_selectable():
+    """A device can advertise a read-write source selector with its options."""
+    group = SelectableCapabilities(
+        access=Access(read=True, write=True),
+        options=(BiasCompensationSource.MANUAL, BiasCompensationSource.DAC),
+    )
+    capabilities = CurrentAmplifierCapabilities(bias_compensation_source=group)
+
+    assert bool(capabilities.bias_compensation_source) is True
+    assert capabilities.bias_compensation_source.options == (
+        BiasCompensationSource.MANUAL,
+        BiasCompensationSource.DAC,
+    )
 
 
 def test_total_transconductance_multiplies_feedback_by_boost():

@@ -28,6 +28,8 @@ attribute and callers cannot mutate them.
 
 Classes:
     FilterType: The filter responses an amplifier can apply.
+    BiasCompensationSource: The source a device selects for DC bias and input
+        compensation.
     Access: Whether a setting can be read and whether it can be written.
     SelectableCapabilities: An access plus the values it accepts.
     BandwidthCapabilities: A bandwidth domain and whether it is selectable.
@@ -56,6 +58,19 @@ class FilterType(str, Enum):
     LOW_PASS = "low_pass"
     HIGH_PASS = "high_pass"
     BAND_PASS = "band_pass"
+
+
+class BiasCompensationSource(str, Enum):
+    """The source a device selects for DC bias and input compensation.
+
+    One selector feeds both functions together, so a device cannot drive its
+    bias from the DAC while taking its compensation level from a manual control.
+    The member value is the spelling a driver reports; it doubles as the
+    serialised form because the class inherits from ``str``.
+    """
+
+    DAC = "dac"
+    MANUAL = "manual"
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,6 +461,9 @@ class CurrentAmplifierCapabilities:
         output_overload (IndicationCapabilities): Output-overload signal.
         input_compensation (CompensationCapabilities): Input-capacitance
             compensation surface.
+        bias_compensation_source (SelectableCapabilities[BiasCompensationSource]):
+            Shared source selector for DC bias and input compensation; the
+            options are the accepted source values.
         invert_output (Access): Whether the output polarity can be read and set.
     """
 
@@ -467,6 +485,9 @@ class CurrentAmplifierCapabilities:
     )
     input_compensation: CompensationCapabilities = field(
         default_factory=CompensationCapabilities
+    )
+    bias_compensation_source: SelectableCapabilities[BiasCompensationSource] = field(
+        default_factory=SelectableCapabilities
     )
     invert_output: Access = field(default_factory=Access)
 

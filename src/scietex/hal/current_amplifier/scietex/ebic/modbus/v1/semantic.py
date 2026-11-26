@@ -189,14 +189,15 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
     """Current amplifier contract over the EBIC v1.0 relay board.
 
     The driver maps the eight feedback resistors, the four booster gains, the
-    bias enable, the compensation enable and the two source selectors onto the
-    relay map. It reports the four readable functions in
-    :meth:`read_data`; every quantity the board cannot measure stays ``None``.
+    bias enable, the compensation enable, the shared bias/compensation source
+    and the booster source onto the relay map. It reports the five readable
+    functions in :meth:`read_data`; every quantity the board cannot measure
+    stays ``None``.
 
     Attributes:
-        capabilities: The selectable controls the relay map fixes, plus the
-            board's static output range and present-but-unreadable Overcurrent
-            comparator.
+        capabilities: The selectable controls the relay map fixes, including
+            the shared bias and compensation source, plus the board's static
+            output range and present-but-unreadable Overcurrent comparator.
         relays: The relay transport every operation is forwarded to.
         relay_settle_s: The delay inserted after a make write before the writes
             that depend on it, in seconds.
@@ -221,6 +222,10 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         dc_bias=DcBiasCapabilities(enabled=Access(read=True, write=True)),
         input_compensation=CompensationCapabilities(
             enabled=Access(read=True, write=True)
+        ),
+        bias_compensation_source=SelectableCapabilities(
+            access=Access(read=True, write=True),
+            options=(BiasCompensationSource.MANUAL, BiasCompensationSource.DAC),
         ),
         input_overcurrent=IndicationCapabilities(present=True, read=False),
     )
@@ -299,7 +304,7 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
         Return the function state one coil readback encodes.
 
         The board reports no output voltage, current or status value, so every
-        field beyond the four relay-backed functions stays ``None`` and the
+        field beyond the five relay-backed functions stays ``None`` and the
         filter tuple stays empty. ``None`` is not zero and not ``False``: a
         quantity the board cannot measure is unknown, not idle.
 
@@ -314,6 +319,7 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             feedback_resistor_ohm=readback.feedback_resistor_ohm,
             dc_bias_enabled=readback.dc_bias_enabled,
             input_compensation_enabled=readback.input_compensation_enabled,
+            bias_compensation_source=readback.bias_compensation_source,
             filters=(),
         )
 
@@ -385,6 +391,19 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
                 "input compensation", "no compensation state in the snapshot"
             )
         return state.input_compensation_enabled
+
+    async def get_bias_compensation_source(self) -> BiasCompensationSource:
+        """
+        Read the source relay 13 selects for bias and compensation.
+
+        The shared selector is advertised as
+        ``capabilities.bias_compensation_source``. The matching setter is a
+        ``CurrentAmplifierProtocol`` member that this driver overrides.
+
+        Returns:
+            BiasCompensationSource: ``DAC`` or ``MANUAL``.
+        """
+        return (await self._readback()).bias_compensation_source
 
     # -- contract writes ---------------------------------------------------
 
@@ -498,28 +517,15 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
 
         await self._transition("set input compensation", plan)
 
-    # -- non-contract extensions ------------------------------------------
-
-    async def get_bias_compensation_source(self) -> BiasCompensationSource:
-        """
-        Read the source relay 13 selects for bias and compensation.
-
-        This is not a ``CurrentAmplifierProtocol`` member: the capability model
-        has no group for the shared source selector.
-
-        Returns:
-            BiasCompensationSource: ``DAC`` or ``MANUAL``.
-        """
-        return (await self._readback()).bias_compensation_source
-
     async def set_bias_compensation_source(
         self, source: BiasCompensationSource
     ) -> None:
         """
         Select the shared bias and compensation source.
 
-        This is not a ``CurrentAmplifierProtocol`` member: the capability model
-        has no group for the shared source selector. ``MANUAL`` is the power-on
+        Overrides the ``CurrentAmplifierProtocol`` default, which raises: the
+        shared selector is advertised as
+        ``capabilities.bias_compensation_source``. ``MANUAL`` is the power-on
         state, so writing it on a fresh board changes nothing.
 
         Args:
@@ -537,6 +543,8 @@ class EBICModbusV1Amplifier(CurrentAmplifierProtocol):
             return [(Relay.BIAS_COMP_SOURCE, level)]
 
         await self._transition("set bias compensation source", plan)
+
+    # -- non-contract extensions ------------------------------------------
 
     async def get_booster_source(self) -> bool:
         """

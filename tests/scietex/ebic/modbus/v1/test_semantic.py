@@ -560,6 +560,7 @@ def test_a_negative_settle_time_is_rejected_before_io(transition_log):
         ("set_input_compensation", True),
         ("set_boost_gain", 10.0),
         ("select_feedback_resistor", 10_000.0),
+        ("set_bias_compensation_source", BiasCompensationSource.MANUAL),
     ],
 )
 async def test_setters_read_once_and_write_nothing_on_a_repeat(method_name, argument):
@@ -630,12 +631,33 @@ async def test_readback_round_trips_every_setting():
                     assert state.input_overcurrent is None
                     assert state.output_overload is None
                     assert state.input_compensation_level is None
+                    assert (
+                        state.bias_compensation_source is BiasCompensationSource.MANUAL
+                    )
                     assert state.inverted is None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("coils", "expected"),
+    [
+        (POWER_ON_COILS, BiasCompensationSource.MANUAL),
+        (_coils(Relay.BIAS_COMP_SOURCE), BiasCompensationSource.DAC),
+    ],
+    ids=["power-on-manual", "relay-13-dac"],
+)
+async def test_read_data_carries_the_bias_compensation_source(coils, expected):
+    """The snapshot decodes relay 13's coil into the shared source selector."""
+    driver = _driver(FakeRelayAccess(coils))
+
+    state = await driver.read_data()
+
+    assert state.bias_compensation_source is expected
+
+
+@pytest.mark.asyncio
 async def test_read_only_operations_write_nothing():
-    """The snapshot, the four getters and the two extensions only read."""
+    """The snapshot, the five getters and the extension only read."""
     fake = FakeRelayAccess()
     driver = _driver(fake)
 
@@ -832,6 +854,11 @@ async def test_capability_surface_matches_the_relay_map():
     assert capabilities.dc_bias.level == Access()
     assert capabilities.input_compensation.enabled == Access(read=True, write=True)
     assert capabilities.input_compensation.level == Access()
+    assert capabilities.bias_compensation_source.access == Access(read=True, write=True)
+    assert capabilities.bias_compensation_source.options == (
+        BiasCompensationSource.MANUAL,
+        BiasCompensationSource.DAC,
+    )
     assert capabilities.input_overcurrent.present is True
     assert capabilities.input_overcurrent.read is False
     assert not capabilities.bandwidth

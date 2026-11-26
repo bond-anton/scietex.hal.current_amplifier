@@ -9,6 +9,8 @@ Classes:
     Access: Whether a setting can be read and whether it can be written.
     AmplifierState: A snapshot of the values an amplifier reports.
     BandwidthCapabilities: A bandwidth domain and whether it is selectable.
+    BiasCompensationSource: The source a device selects for DC bias and input
+        compensation.
     BoostCapabilities: Boost stage gain selection.
     CompensationCapabilities: Input-capacitance compensation surface.
     CurrentAmplifierCapabilities: The complete capability set for one amplifier.
@@ -35,6 +37,7 @@ Modules:
 from .capabilities import (
     Access,
     BandwidthCapabilities,
+    BiasCompensationSource,
     BoostCapabilities,
     CompensationCapabilities,
     CurrentAmplifierCapabilities,
@@ -54,6 +57,7 @@ __all__ = [
     "Access",
     "AmplifierState",
     "BandwidthCapabilities",
+    "BiasCompensationSource",
     "BoostCapabilities",
     "CompensationCapabilities",
     "CurrentAmplifierCapabilities",
